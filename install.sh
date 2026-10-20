@@ -25,7 +25,11 @@ ask() {  # prompt on the terminal even if stdin is a pipe; fall back to the defa
   if { exec 3</dev/tty; } 2>/dev/null; then read -r -p "$1 " a <&3 || a=""; exec 3<&-; fi
   echo "${a:-$2}"
 }
-reload_udev() { sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=hidraw --action=add || true; }
+reload_udev() {
+  sudo udevadm control --reload-rules || true
+  sudo udevadm trigger --subsystem-match=hidraw --action=add || true
+  sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=1038 --action=change || true
+}
 
 if [[ "${1:-}" == "--uninstall" || "${1:-}" == "--purge" ]]; then
   say "Removing nova-chatmix"

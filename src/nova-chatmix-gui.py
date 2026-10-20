@@ -650,9 +650,17 @@ class Window(QWidget):
             cols.addWidget(self.columns[key], 1)
         root.addLayout(cols, 1)
 
+        foot = QHBoxLayout()
         self.status = QLabel()
         self.status.setObjectName("hint")
-        root.addWidget(self.status)
+        self.reset_btn = QPushButton("Reset DAC")
+        self.reset_btn.setIcon(QIcon.fromTheme("view-refresh"))
+        self.reset_btn.setToolTip("Headphones gone quiet? Does the same as unplugging the "
+                                  "GameDAC and plugging it back in.")
+        self.reset_btn.clicked.connect(self.reset_dac)
+        foot.addWidget(self.status, 1)
+        foot.addWidget(self.reset_btn)
+        root.addLayout(foot)
 
         self.apply_style()
 
@@ -704,6 +712,22 @@ class Window(QWidget):
         for idx in card.get("indices") or []:
             if sink:
                 safe_pactl("move-sink-input", str(idx), sink)
+        self.refresh()
+
+    def reset_dac(self):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(out):
+            rc = svc.reset_dac()
+        self.reset_btn.setEnabled(False)
+        self.reset_btn.setText("Resetting…" if rc == 0 else "Reset failed")
+        self.reset_btn.setToolTip(out.getvalue().strip())
+        QTimer.singleShot(8000, self._reset_done)
+
+    def _reset_done(self):
+        self.reset_btn.setEnabled(True)
+        self.reset_btn.setText("Reset DAC")
         self.refresh()
 
     def start_service(self):

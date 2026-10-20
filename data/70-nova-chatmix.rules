@@ -1,3 +1,11 @@
-# nova-chatmix: let the logged-in user talk to the Arctis Nova Pro Wired GameDAC
-# (Gen 2) control interface without root, so the ChatMix service can run as you.
+# nova-chatmix: SteelSeries Arctis Nova Pro Wired GameDAC (Gen 2)
+
+# Let the logged-in user talk to the DAC's control interface without root,
+# so the ChatMix service can run as you.
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="12cb|12cd|12fa", TAG+="uaccess"
+
+# Keep the DAC awake: when USB power saving suspends it, it can come back
+# showing levels on its screen but sending nothing to the headphones until
+# it's replugged. uaccess here lets `nova-chatmix --reset-dac` (the window's
+# Reset DAC button) do a software replug without root.
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="1038", ATTR{idProduct}=="12cb|12cd|12fa", ATTR{power/control}="on", TAG+="uaccess"

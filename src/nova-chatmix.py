@@ -23,10 +23,11 @@ used: unknown ones get a USB STALL and can wedge it until a replug.
 Only needs Python 3 (stdlib) and pactl (pipewire-pulse).
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 import argparse
 import errno
+import fcntl
 import glob
 import json
 import logging
@@ -44,6 +45,9 @@ VENDOR_ID = 0x1038
 PRODUCT_IDS = {0x12CB, 0x12CD, 0x12FA}  # Nova Pro Wired, Wired (Xbox), Wired V2
 HID_INTERFACE = 4
 HIDRAW_SYSFS = "/sys/class/hidraw"
+USB_SYSFS = "/sys/bus/usb/devices"
+USBFS = "/dev/bus/usb"
+USBDEVFS_RESET = 0x5514  # _IO('U', 20)
 REPORT_LEN = 16
 TX = 0x06
 RX = 0x07
@@ -102,6 +106,61 @@ def find_hidraw():
         if interface_number(node) == HID_INTERFACE:
             return "/dev/" + os.path.basename(node), pid
     return None, None
+
+
+def find_usb_devices():
+    """sysfs dirs of every connected GameDAC (the USB device, not an interface)."""
+    found = []
+    for dev in sorted(glob.glob(os.path.join(USB_SYSFS, "*"))):
+        try:
+            with open(os.path.join(dev, "idVendor")) as f:
+                vid = int(f.read().strip(), 16)
+            with open(os.path.join(dev, "idProduct")) as f:
+                pid = int(f.read().strip(), 16)
+        except (OSError, ValueError):
+            continue  # interfaces and hubs have no idVendor of ours
+        if vid == VENDOR_ID and pid in PRODUCT_IDS:
+            found.append(dev)
+    return found
+
+
+def reset_dac():
+    """Software 'unplug and replug': a USB port reset of the GameDAC.
+
+    Same as pulling the cable, without touching it. The service notices the DAC
+    going away and coming back and sets everything up again by itself."""
+    devs = find_usb_devices()
+    if not devs:
+        print("No Arctis Nova Pro Wired GameDAC found.", file=sys.stderr)
+        return 1
+    rc = 0
+    for dev in devs:
+        try:
+            with open(os.path.join(dev, "busnum")) as f:
+                bus = int(f.read())
+            with open(os.path.join(dev, "devnum")) as f:
+                num = int(f.read())
+        except (OSError, ValueError) as e:
+            print(f"{dev}: can't read its USB address ({e})", file=sys.stderr)
+            rc = 1
+            continue
+        node = os.path.join(USBFS, f"{bus:03d}", f"{num:03d}")
+        try:
+            fd = os.open(node, os.O_WRONLY)
+        except PermissionError:
+            print(f"No permission to reset {node}. Unplug and replug the DAC once so the "
+                  "udev rule from nova-chatmix applies, then try again.", file=sys.stderr)
+            rc = 1
+            continue
+        try:
+            fcntl.ioctl(fd, USBDEVFS_RESET, 0)
+            print(f"Reset the GameDAC ({node}). Audio comes back in a few seconds.")
+        except OSError as e:
+            print(f"Resetting {node} failed: {e}", file=sys.stderr)
+            rc = 1
+        finally:
+            os.close(fd)
+    return rc
 
 
 def interface_number(hidraw_sysfs):
@@ -786,6 +845,8 @@ def main():
     p.add_argument("--boot-wait", type=float, default=DAC_BOOT_WAIT_S, help=argparse.SUPPRESS)
     p.add_argument("--listen", action="store_true",
                    help="debug: print raw DAC reports while you turn the dial")
+    p.add_argument("--reset-dac", action="store_true",
+                   help="headphones silent? reset the GameDAC (same as unplugging it and back in)")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -793,6 +854,8 @@ def main():
                         format="%(levelname)s %(message)s")
     if args.listen:
         return listen(args)
+    if args.reset_dac:
+        sys.exit(reset_dac())
 
     d = Daemon(args)
     signal.signal(signal.SIGTERM, d.stop)

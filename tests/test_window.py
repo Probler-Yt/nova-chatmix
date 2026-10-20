@@ -110,5 +110,10 @@ st = json.load(open(os.environ["FAKE_PACTL_STATE"]))
 check(("THE FINALS", "playing") in col(None) and "steam:2073850" not in svc.load_rules()
       and next(s for s in st["streams"] if s["index"] == 21)["sink"] == st["default"],
       "drag back to Apps: unassigned and its audio goes back to the default output")
+calls = []
+svc.reset_dac = lambda: calls.append(1) or 0
+w.reset_btn.click()
+app.processEvents()
+check(calls == [1] and not w.reset_btn.isEnabled(), "Reset DAC button resets the DAC and waits for it to come back")
 w.close()
 check.done()

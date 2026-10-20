@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1
+
+- **Headphones going silent until the DAC is replugged:** the GameDAC is now kept out of USB power saving, which can leave it showing levels on its screen while sending nothing to the headphones. (Unplug and replug it once after updating so the new rule applies.)
+- **Reset DAC button** in the window, and `nova-chatmix --reset-dac`: a software unplug-and-replug for when the headphones do go quiet.
+- README: install from source with `makepkg -si` while AUR sign-ups are paused.
+
 ## 1.0.0
 
 First release.

@@ -20,11 +20,17 @@ On older Arctis headsets ChatMix was done in hardware. On the Nova Pro, SteelSer
 
 ## Install
 
-### Arch Linux / CachyOS / EndeavourOS / Manjaro (AUR)
+### Arch Linux / CachyOS / EndeavourOS / Manjaro
+
+> The AUR package is on its way: AUR sign-ups are temporarily paused. Until then, build the same package yourself:
 
 ```sh
-yay -S nova-chatmix        # or: paru -S nova-chatmix
+git clone https://github.com/Probler-Yt/nova-chatmix
+cd nova-chatmix/packaging/aur
+makepkg -si
 ```
+
+Once it's on the AUR, `yay -S nova-chatmix` will work too, and it'll take over updates for a copy you built this way.
 
 Then open **ChatMix** from your app menu and click **Turn it on**, or run `systemctl --user enable --now nova-chatmix`. Unplug and replug the GameDAC once so the new permissions apply.
 
@@ -79,6 +85,7 @@ Assignments live in `~/.config/nova-chatmix/rules.json`.
 | Logs | `journalctl --user -u nova-chatmix -f` |
 | What the window can see | `nova-chatmix-gui --debug` (please include this in bug reports) |
 | Raw dial data | `systemctl --user stop nova-chatmix && nova-chatmix --listen` |
+| Headphones silent, but the DAC's L/R bars move | Click **Reset DAC** in the window (or run `nova-chatmix --reset-dac`). It's a software unplug-and-replug. If it only ever happens on the first boot, look for an **ErP** (or "USB power in S5") option in your BIOS, which cuts USB power when the PC is off so the DAC starts fresh |
 | Dial does nothing | Unplug and replug the DAC; make sure no other Arctis app is running |
 | Restart | `systemctl --user restart nova-chatmix` |
 

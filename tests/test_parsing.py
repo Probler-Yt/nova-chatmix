@@ -72,4 +72,26 @@ svc.HIDRAW_SYSFS = os.path.join(root, "class")
 check(svc.find_hidraw() == ("/dev/hidraw4", 0x12CB), "finds the GameDAC's control interface")
 check(svc.parse_chatmix(bytes([7, 0x45, 64, 100])) == (64, 100) and svc.parse_chatmix(bytes([7, 0x25, 1, 2])) is None,
       "dial reports parsed, others ignored")
+
+# --reset-dac: find the GameDAC's USB device node and reset it
+usb = os.path.join(root, "usb")
+for name, vid, pid, bus, dev in (("1-4", "1038", "12cb", 1, 7), ("1-5", "1038", "1836", 1, 9), ("1-4:1.4", None, None, 0, 0)):
+    d = os.path.join(usb, name)
+    os.makedirs(d)
+    if vid:
+        for k, v in (("idVendor", vid), ("idProduct", pid), ("busnum", bus), ("devnum", dev)):
+            open(os.path.join(d, k), "w").write(f"{v}\n")
+usbfs = os.path.join(root, "usbfs")
+os.makedirs(os.path.join(usbfs, "001"))
+open(os.path.join(usbfs, "001", "007"), "w").close()
+svc.USB_SYSFS, svc.USBFS = usb, usbfs
+check([os.path.basename(d) for d in svc.find_usb_devices()] == ["1-4"], "reset finds the GameDAC, not the mouse or interfaces")
+calls = []
+svc.fcntl.ioctl = lambda fd, req, arg: calls.append(req)
+check(svc.reset_dac() == 0 and calls == [0x5514], "reset sends USBDEVFS_RESET to /dev/bus/usb/001/007")
+os.chmod(os.path.join(usbfs, "001", "007"), 0o444)
+if os.geteuid() != 0:
+    check(svc.reset_dac() == 1, "no permission: explains how to fix instead of crashing")
+svc.USB_SYSFS = os.path.join(root, "nothing")
+check(svc.reset_dac() == 1, "no DAC plugged in: clear message")
 check.done()
