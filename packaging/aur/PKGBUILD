@@ -13,7 +13,7 @@ install=nova-chatmix.install
 # The release asset (not GitHub's auto-generated archive) so installs show up
 # in the repo's download count.
 source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('66d8e5e3037808c1c26371f7b5f32d8eb817963f46ee3b6ba93cacf543ec052d')
 
 package() {
   cd "$pkgname-$pkgver"
