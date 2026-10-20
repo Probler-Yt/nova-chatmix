@@ -1,0 +1,25 @@
+_retrigger() {
+  udevadm control --reload-rules 2>/dev/null || true
+  udevadm trigger --subsystem-match=hidraw --action=add 2>/dev/null || true
+}
+
+post_install() {
+  _retrigger
+  cat <<'EOF'
+==> nova-chatmix: open "ChatMix" from your app menu and click "Turn it on",
+    or run (as your user, no sudo):
+        systemctl --user enable --now nova-chatmix
+==> Only one app can drive the dial: stop Arctis Sound Manager / Linux Arctis
+    Manager / SteelSeries tools first if you use them.
+==> Unplug and replug the GameDAC once so the new permissions apply.
+EOF
+}
+
+post_upgrade() {
+  _retrigger
+  echo "==> nova-chatmix: restart it to use the new version:  systemctl --user restart nova-chatmix"
+}
+
+pre_remove() {
+  echo "==> nova-chatmix: stop it for your user first if it's running:  systemctl --user disable --now nova-chatmix"
+}

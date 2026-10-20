@@ -1,0 +1,3 @@
+# nova-chatmix: let the logged-in user talk to the Arctis Nova Pro Wired GameDAC
+# (Gen 2) control interface without root, so the ChatMix service can run as you.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="12cb|12cd|12fa", TAG+="uaccess"

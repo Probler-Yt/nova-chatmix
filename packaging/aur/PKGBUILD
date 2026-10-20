@@ -1,0 +1,21 @@
+# Maintainer: Probler <https://github.com/Probler-Yt>
+
+pkgname=nova-chatmix
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Hardware ChatMix dial for the SteelSeries Arctis Nova Pro Wired on Linux, with drag-and-drop app routing"
+arch=('any')
+url="https://github.com/Probler-Yt/nova-chatmix"
+license=('MIT')
+depends=('python' 'libpulse' 'pyside6')
+optdepends=('pipewire-pulse: the sound server it is built and tested for')
+install=nova-chatmix.install
+# The release asset (not GitHub's auto-generated archive) so installs show up
+# in the repo's download count.
+source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cd "$pkgname-$pkgver"
+  make DESTDIR="$pkgdir" PREFIX=/usr install
+}

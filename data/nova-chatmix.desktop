@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ChatMix
+GenericName=Game / Chat audio mixer
+Comment=Drag apps between Game, Chat and Media on your Arctis Nova Pro dial
+Exec=@BINDIR@/nova-chatmix-gui
+Icon=audio-headphones
+Categories=AudioVideo;Audio;Mixer;
+Keywords=audio;chatmix;discord;arctis;steelseries;nova;sonar;
+StartupWMClass=nova-chatmix

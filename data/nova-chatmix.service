@@ -1,0 +1,13 @@
+[Unit]
+Description=ChatMix dial for the SteelSeries Arctis Nova Pro Wired GameDAC
+Documentation=https://github.com/Probler-Yt/nova-chatmix
+After=pipewire-pulse.service wireplumber.service
+Wants=pipewire-pulse.service
+
+[Service]
+ExecStart=@BINDIR@/nova-chatmix
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
