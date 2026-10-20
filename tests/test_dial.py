@@ -47,7 +47,7 @@ def dial(game, chat):
 
 
 open(DEV, "w").close()
-d = svc.Daemon(types.SimpleNamespace(sink=None, no_media=False, no_default=False, boot_wait=0.0,
+d = svc.Daemon(types.SimpleNamespace(sink=None, no_media=False, no_default=False, boot_wait=0.2,
                                      verbose=False, listen=False))
 t = threading.Thread(target=d.run, daemon=True)
 t.start()
@@ -77,6 +77,20 @@ check(vols()["ChatMix_Game"] == "40%", "unrelated reports ignored")
 setstate(modules={})  # PipeWire restarted, all our modules vanished
 time.sleep(7)
 check(len(state()["modules"]) == 6 and vols()["ChatMix_Game"] == "40%", "rebuilt after a PipeWire restart, mix kept")
+
+# Reset DAC: the DAC's audio blinks away and back, PipeWire drops our links into
+# it, and the DAC forgets ChatMix mode. Everything must come back on its own.
+peer["sock"].settimeout(0.2)
+try:
+    while True:
+        peer["sock"].recv(64)  # drain
+except OSError:
+    pass
+setstate(links_down=True)
+time.sleep(3.5)
+check(len(state()["modules"]) == 6 and not state().get("links_down"), "dropped links to the DAC noticed and reconnected")
+check(vols()["ChatMix_Game"] == "40%", "dial position kept across the reconnect")
+check(recv(2)[1][:3] == bytes([6, 0x49, 1]), "ChatMix switched back on after the DAC reset")
 
 setstate(dac_present=False)  # unplug
 os.remove(DEV)

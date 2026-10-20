@@ -23,7 +23,7 @@ used: unknown ones get a USB STALL and can wedge it until a replug.
 Only needs Python 3 (stdlib) and pactl (pipewire-pulse).
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 import argparse
 import errno
@@ -56,6 +56,7 @@ OP_CHATMIX_ENABLE = 0x49
 OP_CHATMIX = 0x45
 COMMAND_GAP_S = 0.05
 DAC_BOOT_WAIT_S = 5.0
+HEALTH_CHECK_S = 2.0
 
 # ----------------------------------------------------------------- audio ---
 
@@ -418,11 +419,22 @@ class Audio:
                 pactl("set-default-sink", self.dac_sink)
 
     def healthy(self):
+        """True when the outputs exist and each one is still connected to the DAC.
+
+        If the DAC's audio device disappears even for a moment (a USB reset,
+        WirePlumber switching its profile), PipeWire drops the links into it
+        while our outputs stay put - so everything plays into nothing."""
         try:
-            names = {s.get("name") for s in pactl_json("sinks")}
+            sinks = pactl_json("sinks")
+            inputs = pactl_json("sink-inputs")
         except Exception:
             return False
-        return self.dac_sink in names and all(SINKS[k][0] in names for k in self.keys)
+        names = {s.get("name") for s in sinks}
+        if self.dac_sink not in names or not all(SINKS[k][0] in names for k in self.keys):
+            return False
+        dac_index = next(str(s.get("index")) for s in sinks if s.get("name") == self.dac_sink)
+        linked = {str(si.get("owner_module")) for si in inputs if str(si.get("sink")) == dac_index}
+        return all(str(self.loop_ids.get(k)) in linked for k in self.keys)
 
     def _resolve_streams(self):
         """Map each loopback module to the sink-input that plays into the DAC."""
@@ -718,8 +730,7 @@ class Daemon:
         self.rules.start()
 
         self.dac = Dac(path)
-        self.dac.send(OP_STATUS)
-        self.dac.send(OP_CHATMIX_ENABLE, 0x01)
+        self.arm_dac()
         log.info("ChatMix enabled on the dial (press the dial to switch volume/ChatMix)")
 
         last_check = time.monotonic()
@@ -740,12 +751,13 @@ class Daemon:
                 if latest:
                     log.debug("dial: game %d%% chat %d%%", *latest)
                     self.audio.set_mix(*latest)
-            if time.monotonic() - last_check > 5:
+            if time.monotonic() - last_check > HEALTH_CHECK_S:
                 last_check = time.monotonic()
                 if not os.path.exists(path):
                     raise DeviceGone()
                 if not self.audio.healthy():
-                    log.warning("audio graph changed (PipeWire restart?), rebuilding")
+                    log.warning("lost the connection to the GameDAC's audio (DAC reset or "
+                                "PipeWire restart?) - reconnecting")
                     game, chat = self.audio.applied.get("game", 100), self.audio.applied.get("chat", 100)
                     self.audio.teardown(restore_default=False)
                     sink = self.wait_for_dac_sink(10)
@@ -755,8 +767,17 @@ class Daemon:
                     self.audio.build()
                     self.audio.set_mix(game, chat)
                     self.rules.start()
+                    # A DAC that reset has forgotten ChatMix mode: give it a moment
+                    # to boot, then switch the dial back to ChatMix.
+                    self.sleep(self.args.boot_wait)
+                    self.arm_dac()
+                    last_check = time.monotonic()
                 elif not self.rules.alive():
                     self.rules.start()
+
+    def arm_dac(self):
+        self.dac.send(OP_STATUS)
+        self.dac.send(OP_CHATMIX_ENABLE, 0x01)
 
     def sleep(self, seconds):
         end = time.monotonic() + seconds

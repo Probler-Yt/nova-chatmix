@@ -20,8 +20,14 @@ if a[:3] == ["-f", "json", "list"]:
     k = a[3]
     if k == "sinks": out = json.dumps(sinks())
     elif k == "modules": out = json.dumps([{"index": int(i), "name": m["name"], "argument": " ".join(m["args"])} for i, m in st["modules"].items()])
-    elif k == "sink-inputs": out = json.dumps([{"index": int(i)+5000, "owner_module": i} for i, m in st["modules"].items() if m["name"] == "module-loopback"])
+    elif k == "sink-inputs":
+        # "links_down": the DAC blinked away and PipeWire dropped the loopback
+        # streams into it, while the modules themselves are still loaded
+        out = json.dumps([] if st.get("links_down") or not st["dac_present"] else
+                         [{"index": int(i)+5000, "owner_module": i, "sink": 2}
+                          for i, m in st["modules"].items() if m["name"] == "module-loopback"])
 elif a[0] == "load-module":
+    st["links_down"] = False
     if st["fail_dont_move"] and any("dont_move" in x for x in a): rc = 1
     else:
         mid = st["next"]; st["next"] += 1; st["modules"][str(mid)] = {"name": a[1], "args": a[2:]}; out = str(mid)
