@@ -7,15 +7,20 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      NEEDRESTART_MODE: a
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install Qt runtime libraries, PipeWire and tools
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libfontconfig1 \
+          sudo -E apt-get update
+          sudo -E apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold libegl1 libgl1 libxkbcommon0 libfontconfig1 \
             libdbus-1-3 shellcheck pipewire pipewire-bin pipewire-pulse wireplumber pulseaudio-utils \
             libspa-0.2-modules dbus
       - name: Install Python packages
@@ -25,6 +30,7 @@ jobs:
       - name: Shellcheck
         run: shellcheck -S warning install.sh scripts/*.sh && bash -n packaging/aur/nova-chatmix.install
       - name: Tests (simulated GameDAC and KDE session, real PipeWire)
+        timeout-minutes: 15
         run: python tests/run.py
         env:
           QT_QPA_PLATFORM: offscreen
