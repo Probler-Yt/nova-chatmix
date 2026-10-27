@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
-"""Run every test, also with pactl's JSON output broken (forces the text fallback)."""
+"""Run every test, also with pactl's JSON output broken (forces the text fallback).
+
+test_real_pipewire.py starts its own throwaway PipeWire session; it skips itself
+when PipeWire isn't installed. --no-gui / --no-pipewire leave suites out."""
 import os
 import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SUITES = ["test_parsing.py", "test_dial.py", "test_routing.py", "test_window.py"]
+SUITES = ["test_parsing.py", "test_eq.py", "test_dial.py", "test_routing.py", "test_window.py",
+          "test_real_pipewire.py"]
 if "--no-gui" in sys.argv:
     SUITES.remove("test_window.py")
+if "--no-pipewire" in sys.argv:
+    SUITES.remove("test_real_pipewire.py")
 
 failed = []
 for broken in (False, True):
     for suite in SUITES:
-        if broken and suite in ("test_parsing.py", "test_dial.py"):
-            continue  # nothing there reads full pactl listings
+        if broken and suite in ("test_parsing.py", "test_eq.py", "test_dial.py", "test_real_pipewire.py"):
+            continue  # nothing there reads full fake pactl listings
         label = suite + (" [broken pactl JSON]" if broken else "")
         print(f"\n=== {label}")
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
         if broken:
             env["FAKE_BROKEN_JSON"] = "1"
-        r = subprocess.run([sys.executable, os.path.join(HERE, suite)], cwd=HERE, env=env, timeout=180)
+        r = subprocess.run([sys.executable, os.path.join(HERE, suite)], cwd=HERE, env=env, timeout=600)
         if r.returncode:
             failed.append(label)
 

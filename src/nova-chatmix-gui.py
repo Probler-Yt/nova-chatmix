@@ -10,6 +10,10 @@ ChatMix window - drag apps between Apps, Chat, Media and Game for nova-chatmix.
          now and every time it plays, even with this window closed.
          Drag it back to Apps to unassign.
 
+  EQ     each of Chat / Media / Game can have its own EQ: pick one of the
+         SteelSeries Sonar presets (downloaded when you open the picker) or
+         load a Sonar preset file.
+
   nova-chatmix-gui --debug   print what the window can see, then exit
 """
 
@@ -247,10 +251,15 @@ def audio_snapshot():
     sinks = safe_list("sinks", errors)
     present = {k for k in LABELS if any(s.get("name") == PREFIX + k.capitalize() for s in sinks)}
     loop_modules = {}
-    for m in safe_list("modules", errors):
+    try:
+        modules = svc.list_modules()
+    except Exception as e:
+        errors.append(f"couldn't read modules: {e}")
+        modules = []
+    for idx, _, arg in modules:
         for k in LABELS:
-            if f"source={PREFIX}{k.capitalize()}.monitor" in (m.get("argument") or ""):
-                loop_modules[str(m.get("index"))] = k
+            if f"source={PREFIX}{k.capitalize()}.monitor" in arg:
+                loop_modules[str(idx)] = k
     clients = {str(c.get("index")): c for c in safe_list("clients", errors)}
 
     levels, streams = {}, []
@@ -258,6 +267,10 @@ def audio_snapshot():
         owner = str(si.get("owner_module"))
         if owner in loop_modules:
             levels[loop_modules[owner]] = volume_percent(si)
+            continue
+        node = (si.get("properties") or {}).get("node.name", "")
+        if node.startswith("nova_chatmix_eq_"):
+            levels[node[len("nova_chatmix_eq_"):]] = volume_percent(si)
             continue
         props = si.get("properties") or {}
         legacy = svc.stream_key(props)
@@ -274,13 +287,16 @@ def audio_snapshot():
             "title": (props.get("media.name") or "").strip(),
         })
     state = svc._read(svc.STATE_PATH)
+    eq_state = {}
     if state:  # the service publishes the dial position; more reliable than guessing
         try:
-            levels.update({k: v for k, v in json.loads(state).get("levels", {}).items()
-                           if v is not None})
+            st = json.loads(state)
+            levels.update({k: v for k, v in st.get("levels", {}).items() if v is not None})
+            eq_state = st.get("eq", {}) if isinstance(st.get("eq"), dict) else {}
         except ValueError:
             pass
-    return {"present": present, "levels": levels, "streams": streams, "errors": errors}
+    return {"present": present, "levels": levels, "streams": streams, "errors": errors,
+            "eq_state": eq_state}
 
 
 def build_cards(apps, snap, rules, index=None):
@@ -325,12 +341,114 @@ def migrate_rules(rules, apps):
     return changed
 
 
-def save_rules(rules):
+def _read_settings():
+    try:
+        with open(svc.RULES_PATH) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_settings(data):
     os.makedirs(os.path.dirname(svc.RULES_PATH), exist_ok=True)
     tmp = svc.RULES_PATH + ".tmp"
     with open(tmp, "w") as f:
-        json.dump({"apps": dict(sorted(rules.items()))}, f, indent=2)
+        json.dump(data, f, indent=2)
     os.replace(tmp, svc.RULES_PATH)  # atomic, so the service never reads half a file
+
+
+def save_rules(rules):
+    data = _read_settings()
+    data["apps"] = dict(sorted(rules.items()))
+    _write_settings(data)
+
+
+def save_eq(output, spec):
+    """spec = {"name", "source", "filters"} or None to turn that output's EQ off."""
+    data = _read_settings()
+    eq = data.get("eq") if isinstance(data.get("eq"), dict) else {}
+    if spec:
+        eq[output] = spec
+    else:
+        eq.pop(output, None)
+    data["eq"] = eq
+    _write_settings(data)
+
+
+def current_eq():
+    data = _read_settings().get("eq")
+    return data if isinstance(data, dict) else {}
+
+
+# ------------------------------------------------------- Sonar presets ---
+# SteelSeries' Sonar presets, as collected by the Arctis Sound Manager project
+# (github.com/loteran/Arctis-Sound-Manager). They're fetched on demand and kept
+# in ~/.cache, rather than shipped with nova-chatmix.
+
+SONAR_REPO = "https://raw.githubusercontent.com/loteran/Arctis-Sound-Manager/main"
+SONAR_MANIFEST = SONAR_REPO + "/presets_manifest.json"
+SONAR_FILE = SONAR_REPO + "/src/arctis_sound_manager/gui/presets/"
+SONAR_CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
+                           "nova-chatmix", "sonar")
+SONAR_MAX_AGE_S = 24 * 3600
+
+
+def _http_get(url, timeout=10):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "nova-chatmix"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def sonar_manifest(refresh=False):
+    """List of preset file names; from cache when fresh or offline."""
+    path = os.path.join(SONAR_CACHE, "manifest.json")
+    try:
+        fresh = time.time() - os.stat(path).st_mtime < SONAR_MAX_AGE_S
+    except OSError:
+        fresh = False
+    if refresh or not fresh:
+        try:
+            data = json.loads(_http_get(SONAR_MANIFEST))
+            names = [n for n in data.get("presets", []) if isinstance(n, str) and n.endswith(".json")]
+            if names:
+                os.makedirs(SONAR_CACHE, exist_ok=True)
+                with open(path + ".tmp", "w") as f:
+                    json.dump({"presets": names}, f)
+                os.replace(path + ".tmp", path)
+        except Exception:
+            pass  # offline: fall back to whatever we had
+    try:
+        with open(path) as f:
+            return json.load(f)["presets"]
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+def sonar_preset(filename):
+    """The preset's filters (downloaded once, then cached)."""
+    from urllib.parse import quote
+    safe = os.path.basename(filename)
+    path = os.path.join(SONAR_CACHE, "presets", safe)
+    if not os.path.exists(path):
+        raw = _http_get(SONAR_FILE + quote(safe))
+        json.loads(raw)  # refuse to cache anything that isn't JSON
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".tmp", "wb") as f:
+            f.write(raw)
+        os.replace(path + ".tmp", path)
+    with open(path) as f:
+        return svc.eq_from_sonar(json.load(f))
+
+
+def preset_label(filename):
+    """'Anno 117_ Pax Romana [Game].json' -> ('Anno 117: Pax Romana', 'Game')."""
+    base = filename[:-5] if filename.endswith(".json") else filename
+    kind = ""
+    if base.endswith("]") and " [" in base:
+        base, kind = base[:-1].rsplit(" [", 1)
+    return base.replace("_ ", ": ").replace("_", " ").strip(), kind
 
 
 def debug_dump():
@@ -369,10 +487,12 @@ if "--debug" in sys.argv:
     debug_dump()
     sys.exit(0)
 
-from PySide6.QtCore import (QMimeData, QProcess, QProcessEnvironment, QSize, Qt,  # noqa: E402
-                            QTimer)
-from PySide6.QtGui import QAction, QColor, QDrag, QIcon, QPainter, QPixmap  # noqa: E402
-from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMenu,  # noqa: E402
+from PySide6.QtCore import (QMimeData, QPointF, QProcess, QProcessEnvironment,  # noqa: E402
+                            QSize, Qt, QThread, QTimer, Signal)
+from PySide6.QtGui import (QAction, QColor, QDrag, QFont, QIcon, QPainter, QPainterPath,  # noqa: E402
+                           QPen, QPixmap)
+from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout,  # noqa: E402
+                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
                                QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 AVATAR_COLOURS = ["#5B8DEF", "#E0697B", "#3FA796", "#C98A2E", "#8E6FD8", "#4AA3C7", "#D46FB0"]
@@ -506,6 +626,8 @@ class LevelBar(QWidget):
         self.update()
 
     def paintEvent(self, _):
+        if self.accent.alpha() == 0:
+            return  # placeholder that only keeps the layout aligned
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
@@ -517,6 +639,257 @@ class LevelBar(QWidget):
         fill.setWidth(int(fill.width() * self.value / 100))
         p.setBrush(self.accent)
         p.drawRoundedRect(fill, 2, 2)
+
+
+class Worker(QThread):
+    """Run fn() off the UI thread; emits (result, error message)."""
+    done = Signal(object, str)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self.fn = fn
+
+    def run(self):
+        try:
+            self.done.emit(self.fn(), "")
+        except Exception as e:  # network, bad file, ...
+            self.done.emit(None, str(e) or e.__class__.__name__)
+
+
+class EqCurve(QWidget):
+    """Frequency response of an EQ, 20 Hz - 20 kHz, preamp included."""
+    FREQS = svc.log_freqs(300)
+
+    def __init__(self, accent, parent=None):
+        super().__init__(parent)
+        self.accent = QColor(accent)
+        self.filters = []
+        self.setMinimumHeight(150)
+
+    def set_filters(self, filters):
+        self.filters = filters or []
+        self.update()
+
+    def paintEvent(self, _):
+        import math
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = self.rect().adjusted(34, 8, -8, -20)
+        text = self.palette().text().color()
+        grid = QColor(text)
+        grid.setAlpha(28)
+        label = QColor(text)
+        label.setAlpha(140)
+        f = QFont(self.font())
+        f.setPointSizeF(max(7.0, f.pointSizeF() - 2))
+        p.setFont(f)
+        span = 15.0  # dB above and below 0
+
+        def x_of(hz):
+            return r.left() + r.width() * math.log10(hz / 20) / 3
+
+        def y_of(db):
+            return r.center().y() - (db / span) * (r.height() / 2)
+
+        for db in (-12, -6, 0, 6, 12):
+            y = y_of(db)
+            p.setPen(QPen(grid, 1))
+            p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
+            p.setPen(label)
+            p.drawText(QPointF(r.left() - 30, y + 4), f"{db:+d}" if db else " 0")
+        for hz, name in ((20, "20"), (100, "100"), (1000, "1k"), (10000, "10k"), (20000, "20k")):
+            x = x_of(hz)
+            p.setPen(QPen(grid, 1))
+            p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
+            p.setPen(label)
+            p.drawText(QPointF(x - 8, r.bottom() + 15), name)
+        if not self.filters:
+            p.setPen(label)
+            p.drawText(r, Qt.AlignCenter, "Flat - no EQ")
+            return
+        pre = svc.eq_preamp_db(self.filters)
+        resp = svc.eq_response_db(self.filters, self.FREQS)
+        path = QPainterPath()
+        for i, (hz, db) in enumerate(zip(self.FREQS, resp)):
+            pt = QPointF(x_of(hz), y_of(max(-span, min(span, db + pre))))
+            path.lineTo(pt) if i else path.moveTo(pt)
+        p.setPen(QPen(self.accent, 2.2))
+        p.drawPath(path)
+
+
+class EqDialog(QDialog):
+    """Pick a Sonar preset (or a preset file) for one output."""
+
+    def __init__(self, win, output, accent):
+        super().__init__(win)
+        self.win, self.output = win, output
+        self.setWindowTitle(f"{LABELS[output]} EQ")
+        self.resize(560, 600)
+        self.chosen = None  # {"name", "source", "filters"} or None = off
+        self.workers = []
+        cur = current_eq().get(output)
+
+        lay = QVBoxLayout(self)
+        lay.setSpacing(8)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search presets - games, music, movies, chat…")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._filter)
+        lay.addWidget(self.search)
+
+        self.list = QListWidget()
+        self.list.currentItemChanged.connect(self._picked)
+        self.list.itemDoubleClicked.connect(lambda *_: self.apply())
+        lay.addWidget(self.list, 1)
+
+        self.curve = EqCurve(accent)
+        lay.addWidget(self.curve)
+        self.info = QLabel("")
+        self.info.setObjectName("caption")
+        self.info.setWordWrap(True)
+        lay.addWidget(self.info)
+
+        link = self.palette().highlight().color().name()
+        credit = QLabel('Presets: SteelSeries Sonar, as collected by '
+                        f'<a style="color:{link}" href="https://github.com/loteran/Arctis-Sound-Manager">'
+                        'Arctis Sound Manager</a>.')
+        credit.setOpenExternalLinks(True)
+        credit.setObjectName("caption")
+        lay.addWidget(credit)
+
+        buttons = QHBoxLayout()
+        load = QPushButton("Load file…")
+        load.setToolTip("Use a Sonar preset file (.json), e.g. one exported from SteelSeries GG")
+        load.clicked.connect(self.load_file)
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.setDefault(True)
+        self.apply_btn.clicked.connect(self.apply)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(load)
+        buttons.addStretch(1)
+        buttons.addWidget(cancel)
+        buttons.addWidget(self.apply_btn)
+        lay.addLayout(buttons)
+
+        off = QListWidgetItem("Off (no EQ)")
+        off.setData(Qt.UserRole, None)
+        self.list.addItem(off)
+        if cur:
+            self.chosen = {k: cur[k] for k in ("name", "source", "filters") if k in cur}
+            self.curve.set_filters(svc.clean_filters(cur.get("filters")))
+            self.info.setText(f"Now: {cur.get('name', 'Custom')}")
+        else:
+            self.list.setCurrentRow(0)
+        self.loading = QListWidgetItem("Getting the Sonar presets…")
+        self.loading.setFlags(Qt.NoItemFlags)
+        self.list.addItem(self.loading)
+        self._run(sonar_manifest, self._got_manifest)
+
+    def _run(self, fn, cb):
+        w = Worker(fn, self)
+        w.done.connect(cb)
+        w.finished.connect(lambda: self.workers.remove(w) if w in self.workers else None)
+        self.workers.append(w)
+        w.start()
+
+    def _got_manifest(self, names, err):
+        self.list.takeItem(self.list.row(self.loading))
+        if not names:
+            item = QListWidgetItem("Couldn't download the Sonar presets - check your internet "
+                                   "connection, or use Load file…")
+            item.setFlags(Qt.NoItemFlags)
+            self.list.addItem(item)
+            return
+        order = {"chat": ("Chat", "Game"), "media": ("Game", "Chat"), "game": ("Game", "Chat")}[self.output]
+        rows = []
+        for n in names:
+            title, kind = preset_label(n)
+            if kind == "Mic":
+                continue  # microphone presets don't apply to an output
+            rank = order.index(kind) if kind in order else len(order)
+            rows.append((rank, title.lower(), title, kind, n))
+        cur = (self.chosen or {}).get("source")
+        for _, _, title, kind, n in sorted(rows):
+            item = QListWidgetItem(title if kind in ("Game", "") else f"{title}  ·  {kind}")
+            item.setData(Qt.UserRole, n)
+            self.list.addItem(item)
+            if n == cur:
+                self.list.setCurrentItem(item)
+        self._filter(self.search.text())
+
+    def _filter(self, text):
+        t = text.strip().lower()
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            it.setHidden(bool(t) and it.data(Qt.UserRole) is not None and t not in it.text().lower())
+
+    def _picked(self, item, _prev=None):
+        if item is None or not (item.flags() & Qt.ItemIsEnabled):
+            return
+        name = item.data(Qt.UserRole)
+        if name is None:
+            self.chosen = None
+            self.curve.set_filters([])
+            self.info.setText("No EQ on this output.")
+            return
+        self.info.setText("Loading…")
+        self.apply_btn.setEnabled(False)
+
+        def done(filters, err, name=name, title=item.text()):
+            cur = self.list.currentItem()
+            if cur is None or cur.data(Qt.UserRole) != name:
+                return  # user moved on
+            self.apply_btn.setEnabled(True)
+            if err:
+                self.chosen = False
+                self.info.setText(f"Couldn't download this preset ({err}).")
+                return
+            self.chosen = {"name": title.split("  ·  ")[0], "source": name, "filters": filters}
+            self.curve.set_filters(filters)
+            self._describe(filters)
+
+        self._run(lambda: sonar_preset(name), done)
+
+    def _describe(self, filters):
+        if not filters:
+            self.info.setText("This preset is flat - choosing it turns the EQ off.")
+            return
+        pre = svc.eq_preamp_db(filters)
+        self.info.setText(f"{len(filters)} filters. Turned down {abs(pre):.1f} dB overall so its "
+                          "boosts can't clip - turn your volume up a touch to match." if pre < 0
+                          else f"{len(filters)} filters.")
+
+    def load_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load a Sonar preset", os.path.expanduser("~"),
+                                              "Sonar presets (*.json);;All files (*)")
+        if not path:
+            return
+        try:
+            with open(path) as f:
+                filters = svc.eq_from_sonar(json.load(f))
+        except (OSError, ValueError, AttributeError) as e:
+            self.info.setText(f"That file isn't a Sonar preset ({e}).")
+            return
+        title = preset_label(os.path.basename(path))[0]
+        self.chosen = {"name": title, "source": "file:" + os.path.basename(path), "filters": filters}
+        self.list.clearSelection()
+        self.curve.set_filters(filters)
+        self._describe(filters)
+
+    def apply(self):
+        if self.chosen is False:
+            return
+        if self.chosen and self.chosen.get("filters"):
+            save_eq(self.output, self.chosen)
+        else:
+            save_eq(self.output, None)
+        self.accept()
+
+    def done(self, r):
+        for w in list(self.workers):
+            w.wait(2000)
+        super().done(r)
 
 
 class Column(QFrame):
@@ -547,9 +920,20 @@ class Column(QFrame):
         self.caption.setObjectName("caption")
         self.caption.setWordWrap(True)
         outer.addWidget(self.caption)
-        self.bar = LevelBar(accent)
-        self.bar.setVisible(key in ("game", "chat"))
+        # Media has no dial level, but keeps the (empty) bar's space so the
+        # EQ buttons line up across columns.
+        self.bar = LevelBar(accent if key in ("game", "chat") else "transparent")
+        self.bar.setVisible(key is not None)
         outer.addWidget(self.bar)
+        self.accent = accent
+        self.eq_btn = None
+        if key is not None:
+            self.eq_btn = QPushButton("EQ: Off")
+            self.eq_btn.setObjectName("eqButton")
+            self.eq_btn.setCursor(Qt.PointingHandCursor)
+            self.eq_btn.setToolTip(f"Choose an EQ preset for everything in {label}")
+            self.eq_btn.clicked.connect(lambda: self.win.edit_eq(self.key, self.accent))
+            outer.addWidget(self.eq_btn)
         outer.addSpacing(2)
 
         self.list = QVBoxLayout()
@@ -566,6 +950,24 @@ class Column(QFrame):
         scroll.viewport().setAutoFillBackground(False)
         scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget { background: transparent; }")
         outer.addWidget(scroll, 1)
+
+    def set_eq(self, spec, active):
+        if self.eq_btn is None:
+            return
+        if not spec:
+            self.eq_btn.setText("EQ: Off")
+            self.eq_btn.setProperty("on", False)
+            self.eq_btn.setToolTip(f"Choose an EQ preset for this output")
+        else:
+            name = spec.get("name", "Custom")
+            warn = "" if active is not False else "  ⚠"
+            self.eq_btn.setText(f"EQ: {name}{warn}")
+            self.eq_btn.setProperty("on", True)
+            self.eq_btn.setToolTip(f"EQ: {name}" + (
+                "\nIt isn't running - the service couldn't start it, so this output plays "
+                "without EQ. Check: journalctl --user -u nova-chatmix" if active is False else ""))
+        self.eq_btn.style().unpolish(self.eq_btn)
+        self.eq_btn.style().polish(self.eq_btn)
 
     def set_level(self, pct):
         if self.key in ("game", "chat") and pct is not None:
@@ -730,6 +1132,11 @@ class Window(QWidget):
         self.reset_btn.setText("Reset DAC")
         self.refresh()
 
+    def edit_eq(self, output, accent):
+        dlg = EqDialog(self, output, accent)
+        dlg.exec()
+        self.refresh()
+
     def start_service(self):
         import subprocess
         subprocess.Popen(["systemctl", "--user", "enable", "--now", "nova-chatmix.service"],
@@ -751,6 +1158,13 @@ class Window(QWidget):
             save_rules(rules)
         snap = audio_snapshot()
         self.present = snap["present"]
+        eq_state = snap.get("eq_state", {})
+        for key, spec in current_eq().items():
+            if key in self.columns:
+                self.columns[key].set_eq(spec, eq_state.get(key, {}).get("active") if self.present else None)
+        for key, col in self.columns.items():
+            if key and key not in current_eq():
+                col.set_eq(None, None)
         cards = build_cards(apps, snap, rules, self.index)
 
         if snap["errors"]:
@@ -804,6 +1218,10 @@ class Window(QWidget):
             #cardSub, #hint, #empty {{ color: {c(muted)}; }}
             #empty {{ padding: 24px 6px; border: 1px dashed {c(border)}; border-radius: 9px; }}
             #liveDot {{ color: #3DCB6C; font-size: 8pt; }}
+            #eqButton {{ text-align: left; padding: 4px 8px; border-radius: 6px;
+                         border: 1px solid {c(border)}; background: {c(card_bg)}; }}
+            #eqButton:hover {{ background: {c(card_hover)}; }}
+            #eqButton[on="true"] {{ font-weight: 600; }}
             #banner {{ background: rgba(232,163,61,40); border: 1px solid rgba(232,163,61,120);
                        border-radius: 8px; }}
         """)

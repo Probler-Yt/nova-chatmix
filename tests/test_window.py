@@ -115,5 +115,68 @@ svc.reset_dac = lambda: calls.append(1) or 0
 w.reset_btn.click()
 app.processEvents()
 check(calls == [1] and not w.reset_btn.isEnabled(), "Reset DAC button resets the DAC and waits for it to come back")
+# --- EQ picker (downloads stubbed: CI must not depend on the internet)
+import tempfile  # noqa: E402
+SAMPLE_JSON = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_preset.json"), "rb").read()
+served = []
+
+
+def fake_get(url, timeout=10):
+    served.append(url)
+    if url == gui.SONAR_MANIFEST:
+        return json.dumps({"presets": ["Alpha Strike [Game].json", "Big Bass Movie [Game].json",
+                                       "Clear Voices [Chat].json", "Boom Mic [Mic].json"]}).encode()
+    if url.startswith(gui.SONAR_FILE):
+        return SAMPLE_JSON
+    raise OSError("unexpected URL " + url)
+
+
+gui._http_get = fake_get
+gui.SONAR_CACHE = tempfile.mkdtemp()
+
+
+def pump(cond, secs=10):
+    import time
+    end = time.time() + secs
+    while time.time() < end:
+        app.processEvents()
+        if cond():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+check(all(w.columns[k].eq_btn is not None for k in ("chat", "media", "game")) and w.columns[None].eq_btn is None,
+      "Chat, Media and Game each have an EQ button (Apps doesn't)")
+dlg = gui.EqDialog(w, "chat", "#22B59A")
+dlg.show()
+check(pump(lambda: dlg.list.count() == 4), "preset list loads (microphone presets left out)")
+check(dlg.list.item(1).text().startswith("Clear Voices"), "Chat presets listed first in the Chat column")
+dlg.search.setText("bass")
+app.processEvents()
+visible = [dlg.list.item(i).text() for i in range(dlg.list.count()) if not dlg.list.item(i).isHidden()]
+check(visible == ["Off (no EQ)", "Big Bass Movie"], f"search filters the list: {visible}")
+dlg.list.setCurrentItem(next(dlg.list.item(i) for i in range(dlg.list.count())
+                             if dlg.list.item(i).text() == "Big Bass Movie"))
+check(pump(lambda: bool(dlg.chosen and dlg.chosen.get("filters"))), f"choosing one downloads and previews it: {dlg.info.text()}")
+dlg.apply()
+saved = gui.current_eq().get("chat", {})
+check(saved.get("source") == "Big Bass Movie [Game].json" and len(saved.get("filters", [])) == 8, "Apply saves it for Chat")
+check(svc.load_rules().get("discord") == "chat", "app assignments survive saving an EQ")
+w.refresh()
+app.processEvents()
+check(w.columns["chat"].eq_btn.text() == "EQ: Big Bass Movie", f"column shows the EQ: {w.columns['chat'].eq_btn.text()!r}")
+n_before = len(served)
+dlg2 = gui.EqDialog(w, "chat", "#22B59A")
+dlg2.show()
+pump(lambda: dlg2.list.count() == 4)
+dlg2.list.setCurrentItem(next(dlg2.list.item(i) for i in range(dlg2.list.count())
+                              if dlg2.list.item(i).text() == "Big Bass Movie"))
+pump(lambda: bool(dlg2.chosen and dlg2.chosen.get("filters")))
+check(len(served) == n_before, "manifest and preset come from the cache the second time (no downloads)")
+dlg2.list.setCurrentRow(0)
+app.processEvents()
+dlg2.apply()
+check("chat" not in gui.current_eq(), "Off removes the EQ")
 w.close()
 check.done()

@@ -52,11 +52,14 @@ if text_mode:
     a = ["-f", "json", "list", a[1]]
 elif a[:3] == ["-f", "json", "list"] and os.environ.get("FAKE_BROKEN_JSON"):
     print('[{"index": 12, "properties": {"media.name": "bro'); json.dump(st, open(SF, "w")); sys.exit(0)
-if a[:3] == ["-f", "json", "list"]:
+if a == ["list", "modules", "short"]:
+    out = "\n".join(f"{i}\t{m['name']}\t{' '.join(m['args'])}\t" for i, m in sorted(st["modules"].items()))
+elif a[:3] == ["-f", "json", "list"]:
     k = a[3]
     if k == "sinks": out = json.dumps(sinks())
     elif k == "clients": out = json.dumps(st.get("clients", []))
-    elif k == "modules": out = json.dumps([{"index": int(i), "name": m["name"], "argument": " ".join(m["args"])} for i, m in st["modules"].items()])
+    elif k == "modules":  # like real pactl 16: the JSON has no module index
+        out = json.dumps([{"name": m["name"], "argument": " ".join(m["args"]), "usage_counter": "n/a"} for i, m in st["modules"].items()])
     elif k == "sink-inputs":
         res = []
         for i, m in st["modules"].items():

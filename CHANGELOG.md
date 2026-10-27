@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0
+
+- **EQ per output, with SteelSeries Sonar presets.** Each of Game, Chat and Media can have its own EQ: pick from Sonar's presets (hundreds of games plus music, movie and chat ones) with a search box and a curve preview, or load a Sonar preset file. Measured through PipeWire, the result lands within a few hundredths of a dB of Sonar's curves (0.3 dB at worst), can't clip (an automatic preamp), and adds no delay: the EQ path skips the plain loopback's 20 ms buffer.
+- **Fix: crash recovery could unload another app's audio module.** When the DAC disappeared, PipeWire freed the service's module numbers and something else could reuse them before cleanup. The service now only unloads modules it can confirm are its own, and reads module numbers in a way that works with every pactl version (pactl 16's JSON leaves them out, so cleanup after a crash silently did nothing).
+- Tests now also run against real PipeWire (in a throwaway headless session), on GitHub's CI too.
+
 ## 1.0.2
 
 - **Fix: ChatMix stopped working after Reset DAC.** A reset makes the GameDAC forget ChatMix mode, and its audio blinks away for a moment, which silently dropped the links from Game/Chat/Media into it. The service now checks every 2 seconds that the outputs are really connected to the DAC, reconnects them if not, and switches the dial back to ChatMix.

@@ -1,0 +1,21 @@
+{
+  "_comment": "A made-up preset in SteelSeries Sonar's format, for tests. Not a SteelSeries preset.",
+  "bassBoostState": {"enabled": false, "value": 0},
+  "trebleBoostState": {"enabled": false, "value": 0},
+  "voiceClarityState": {"enabled": false, "value": 0},
+  "generalGain": 0,
+  "globalEnableState": true,
+  "parametricEQ": {
+    "enabled": true,
+    "filter1": {"enabled": true, "type": "highPass", "frequency": 25, "qFactor": 0.707, "gain": 0},
+    "filter2": {"enabled": true, "type": "lowShelving", "frequency": 90, "qFactor": 0.707, "gain": 4},
+    "filter3": {"enabled": true, "type": "peakingEQ", "frequency": 300, "qFactor": 1.2, "gain": -3},
+    "filter4": {"enabled": true, "type": "peakingEQ", "frequency": 1200, "qFactor": 8, "gain": 6},
+    "filter5": {"enabled": true, "type": "peakingEQ", "frequency": 2400, "qFactor": 4, "gain": 5},
+    "filter6": {"enabled": true, "type": "highShelving", "frequency": 9000, "qFactor": 0.707, "gain": 3},
+    "filter7": {"enabled": true, "type": "notchFilter", "frequency": 6000, "qFactor": 8, "gain": 0},
+    "filter8": {"enabled": false, "type": "peakingEQ", "frequency": 500, "qFactor": 1, "gain": 9},
+    "filter9": {"enabled": true, "type": "peakingEQ", "frequency": 4000, "qFactor": 1, "gain": 0},
+    "filter10": {"enabled": true, "type": "lowPass", "frequency": 19000, "qFactor": 0.707, "gain": 0}
+  }
+}

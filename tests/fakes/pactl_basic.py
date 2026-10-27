@@ -16,10 +16,13 @@ def sinks():
         if m["name"] == "module-null-sink":
             n = m["args"][0].split("=",1)[1]; s.append({"index": int(mid)+1000, "name": n, "properties": {}})
     return s
-if a[:3] == ["-f", "json", "list"]:
+if a == ["list", "modules", "short"]:
+    out = "\n".join(f"{i}\t{m['name']}\t{' '.join(m['args'])}\t" for i, m in sorted(st["modules"].items()))
+elif a[:3] == ["-f", "json", "list"]:
     k = a[3]
     if k == "sinks": out = json.dumps(sinks())
-    elif k == "modules": out = json.dumps([{"index": int(i), "name": m["name"], "argument": " ".join(m["args"])} for i, m in st["modules"].items()])
+    elif k == "modules":  # like real pactl 16: the JSON has no module index
+        out = json.dumps([{"name": m["name"], "argument": " ".join(m["args"]), "usage_counter": "n/a"} for i, m in st["modules"].items()])
     elif k == "sink-inputs":
         # "links_down": the DAC blinked away and PipeWire dropped the loopback
         # streams into it, while the modules themselves are still loaded

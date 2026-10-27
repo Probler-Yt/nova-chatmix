@@ -8,6 +8,8 @@ What it does:
     through the GameDAC (Media is never turned down by the dial).
   * Tells the DAC to put its dial into ChatMix mode.
   * Listens for dial movements and turns Game / Chat up and down to match.
+  * Optional per-output EQ (Sonar-style parametric presets), run as a PipeWire
+    filter-chain between each output and the DAC.
   * Runs as a systemd user service, survives unplug/replug and PipeWire
     restarts, and hands the dial back to plain volume when it stops.
 
@@ -23,12 +25,15 @@ used: unknown ones get a USB STALL and can wedge it until a replug.
 Only needs Python 3 (stdlib) and pactl (pipewire-pulse).
 """
 
-__version__ = "1.0.2"
+__version__ = "1.1.0"
 
 import argparse
 import errno
 import fcntl
 import glob
+import cmath
+import math
+import shutil
 import json
 import logging
 import os
@@ -192,7 +197,7 @@ class Dac:
         try:
             os.write(self.fd, msg)
         except OSError as e:
-            if e.errno in (errno.ENODEV, errno.EIO, errno.ENOENT, errno.EBADF):
+            if e.errno in (errno.ENODEV, errno.EIO, errno.ENOENT, errno.EBADF, errno.EPIPE):
                 raise DeviceGone() from e
             raise
         finally:
@@ -350,17 +355,328 @@ def unload_module(module_id):
     pactl("unload-module", str(module_id))
 
 
+_MODULE_ROW = re.compile(r"^(\d+)\t([^\t]*)\t(.*)$")
+
+
+def list_modules():
+    """[(index, name, argument)] of loaded modules.
+
+    Uses the short text listing: pactl's JSON for modules leaves out the
+    module index (pactl 16), and the index is the only handle for unloading."""
+    r = pactl("list", "modules", "short")
+    if r.returncode != 0:
+        raise RuntimeError(f"pactl list modules failed: {r.stderr.strip()}")
+    rows = []
+    for line in r.stdout.splitlines():
+        m = _MODULE_ROW.match(line)
+        if m:
+            rows.append((int(m.group(1)), m.group(2), m.group(3)))
+    return rows
+
+
+def is_ours(argument):
+    return f"sink_name={PREFIX}" in argument or f"source={PREFIX}" in argument
+
+
 def unload_stale_modules():
     """Remove anything a previous (crashed / killed) run left behind."""
     try:
-        modules = pactl_json("modules")
+        modules = list_modules()
     except Exception:
         return
-    for m in modules:
-        arg = m.get("argument") or ""
-        if f"sink_name={PREFIX}" in arg or f"source={PREFIX}" in arg:
-            log.info("removing leftover module %s (%s)", m.get("index"), m.get("name"))
-            unload_module(m.get("index"))
+    for idx, name, arg in modules:
+        if is_ours(arg):
+            log.info("removing leftover module %s (%s)", idx, name)
+            unload_module(idx)
+
+
+# ============================================================ equaliser ===
+#
+# An output with an EQ gets a PipeWire filter-chain (run as `pipewire -c`) in
+# place of its plain loopback into the DAC:
+#
+#     apps -> Game (null sink) -> [ preamp -> biquad -> biquad ... ] -> GameDAC
+#
+# The filters are standard RBJ-cookbook biquads (what Sonar uses), processed by
+# PipeWire in 32-bit float. We compute the coefficients ourselves and hand them
+# over as raw biquads, for every common sample rate: PipeWire's own named
+# filters changed maths between versions (1.0 read a low-pass "Q" as dB of
+# resonance and ignored shelf Q), raw coefficients mean the same sound on all.
+# The preamp lowers the whole curve by its loudest boost, so a preset can never
+# push the signal into clipping.
+
+EQ_TYPES = {  # Sonar filter type -> PipeWire builtin
+    "peakingEQ": "bq_peaking", "lowShelving": "bq_lowshelf", "highShelving": "bq_highshelf",
+    "lowPass": "bq_lowpass", "highPass": "bq_highpass", "notchFilter": "bq_notch",
+}
+EQ_GAIN_TYPES = {"bq_peaking", "bq_lowshelf", "bq_highshelf"}
+EQ_MAX_FILTERS = 20
+EQ_RATE = 48000
+EQ_RATES = (44100, 48000, 88200, 96000, 176400, 192000)
+EQ_START_TIMEOUT_S = 5.0
+
+
+def eq_from_sonar(preset):
+    """A SteelSeries Sonar preset (either export format) -> list of filters."""
+    if "parametricEQ" not in preset and isinstance(preset.get("data"), (dict, str)):
+        data = preset["data"]
+        preset = json.loads(data) if isinstance(data, str) else data
+    pe = preset.get("parametricEQ") or {}
+    if pe.get("enabled") is False or preset.get("globalEnableState") is False:
+        return []
+    slots = sorted((k for k in pe if k.startswith("filter") and k[6:].isdigit()), key=lambda k: int(k[6:]))
+    filters = []
+    for k in slots:
+        f = pe[k]
+        if not isinstance(f, dict) or not f.get("enabled", True):
+            continue
+        kind = EQ_TYPES.get(f.get("type"))
+        if kind:
+            filters.append({"type": kind, "freq": float(f.get("frequency", 1000)),
+                            "q": float(f.get("qFactor", 0.707)), "gain": float(f.get("gain", 0))})
+    return clean_filters(filters)
+
+
+def clean_filters(filters):
+    """Validate filters read from the settings file; drop anything odd."""
+    out = []
+    for f in filters if isinstance(filters, list) else []:
+        try:
+            kind = str(f["type"])
+            freq, q, gain = float(f["freq"]), float(f.get("q", 0.707)), float(f.get("gain", 0))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if kind not in EQ_TYPES.values() or not all(map(math.isfinite, (freq, q, gain))):
+            continue
+        if kind in EQ_GAIN_TYPES and abs(gain) < 0.01:
+            continue  # a 0 dB bell or shelf does nothing; "Flat" presets are all of these
+        out.append({"type": kind, "freq": min(max(freq, 10.0), 23000.0),
+                    "q": min(max(q, 0.05), 30.0), "gain": min(max(gain, -30.0), 30.0)})
+    return out[:EQ_MAX_FILTERS]
+
+
+def biquad_coeffs(f, rate=EQ_RATE):
+    """(b0, b1, b2, a0, a1, a2) exactly as PipeWire computes them (spa biquad.c)."""
+    kind, q, gain = f["type"], f["q"], f.get("gain", 0.0)
+    x = min(max(f["freq"] * 2.0 / rate, 0.0), 1.0)  # frequency relative to Nyquist
+    A = 10 ** (gain / 40.0)
+    if kind in ("bq_lowpass", "bq_highpass"):
+        if x in (0.0, 1.0):
+            v = x if kind == "bq_lowpass" else 1 - x
+            return (v, 0, 0, 1, 0, 0)
+        if q <= 0:
+            return (0, 0, 0, 1, 0, 0)
+    elif kind == "bq_lowshelf":
+        if x == 1:
+            return (A * A, 0, 0, 1, 0, 0)
+        if x <= 0:
+            return (1, 0, 0, 1, 0, 0)
+    elif kind == "bq_highshelf":
+        if x == 1:
+            return (1, 0, 0, 1, 0, 0)
+        if x <= 0:
+            return (A * A, 0, 0, 1, 0, 0)
+    elif x <= 0 or x >= 1:  # peaking, notch
+        return (1, 0, 0, 1, 0, 0)
+    if q <= 0:
+        return {"bq_peaking": (A * A, 0, 0, 1, 0, 0), "bq_notch": (0, 0, 0, 1, 0, 0)}.get(kind, (A, 0, 0, 1, 0, 0))
+    w0 = math.pi * x
+    alpha, k = math.sin(w0) / (2 * q), math.cos(w0)
+    if kind == "bq_lowpass":
+        return ((1 - k) / 2, 1 - k, (1 - k) / 2, 1 + alpha, -2 * k, 1 - alpha)
+    if kind == "bq_highpass":
+        return ((1 + k) / 2, -(1 + k), (1 + k) / 2, 1 + alpha, -2 * k, 1 - alpha)
+    if kind == "bq_notch":
+        return (1, -2 * k, 1, 1 + alpha, -2 * k, 1 - alpha)
+    if kind == "bq_peaking":
+        return (1 + alpha * A, -2 * k, 1 - alpha * A, 1 + alpha / A, -2 * k, 1 - alpha / A)
+    k2, ap, am = 2 * math.sqrt(A) * alpha, A + 1, A - 1
+    if kind == "bq_lowshelf":
+        return (A * (ap - am * k + k2), 2 * A * (am - ap * k), A * (ap - am * k - k2),
+                ap + am * k + k2, -2 * (am + ap * k), ap + am * k - k2)
+    return (A * (ap + am * k + k2), -2 * A * (am + ap * k), A * (ap + am * k - k2),  # highshelf
+            ap - am * k + k2, 2 * (am - ap * k), ap - am * k - k2)
+
+
+def eq_response_db(filters, freqs, rate=EQ_RATE):
+    """Magnitude response of the whole filter cascade, in dB, at each frequency."""
+    coeffs = [biquad_coeffs(f, rate) for f in filters]
+    out = []
+    for fr in freqs:
+        z1 = cmath.exp(-2j * math.pi * fr / rate)
+        z2 = z1 * z1
+        h = 1 + 0j
+        for b0, b1, b2, a0, a1, a2 in coeffs:
+            h *= (b0 + b1 * z1 + b2 * z2) / (a0 + a1 * z1 + a2 * z2)
+        out.append(20 * math.log10(max(abs(h), 1e-12)))
+    return out
+
+
+def log_freqs(n=400, lo=20.0, hi=20000.0):
+    return [lo * (hi / lo) ** (i / (n - 1)) for i in range(n)]
+
+
+def eq_preamp_db(filters):
+    """How far to lower the signal so the curve's loudest boost can't clip."""
+    peak = max(eq_response_db(filters, log_freqs(1200, 10.0, 22000.0)), default=0.0)
+    return -math.ceil(max(peak, 0.0) * 10) / 10
+
+
+def load_eq():
+    """{output: {"name": ..., "filters": [...]}} from the settings file."""
+    try:
+        with open(RULES_PATH) as f:
+            raw = json.load(f).get("eq", {})
+    except (OSError, ValueError, AttributeError):
+        return {}
+    eq = {}
+    for key, spec in raw.items() if isinstance(raw, dict) else []:
+        if key in SINKS and isinstance(spec, dict):
+            filters = clean_filters(spec.get("filters"))
+            if filters:
+                eq[key] = {"name": str(spec.get("name") or "Custom")[:100], "filters": filters}
+    return eq
+
+
+def _spa_str(s):
+    return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _raw_node(name, sets):
+    """A bq_raw node; sets = [(rate, (b0, b1, b2, a0, a1, a2)), ...]."""
+    rows = []
+    for rate, (b0, b1, b2, a0, a1, a2) in sets:
+        b0, b1, b2, a1, a2 = (v / a0 for v in (b0, b1, b2, a1, a2))  # normalise: a0 = 1
+        rows.append(f"{{ rate = {rate} b0 = {b0:.12g} b1 = {b1:.12g} b2 = {b2:.12g} "
+                    f"a0 = 1.0 a1 = {a1:.12g} a2 = {a2:.12g} }}")
+    pad = "\n                      "
+    return (f"{{ type = builtin name = {name} label = bq_raw config = {{ coefficients = [{pad}"
+            + pad.join(rows) + " ] } }")
+
+
+def eq_conf(key, filters, source_sink, dac_sink):
+    """A standalone filter-chain config for `pipewire -c`."""
+    gain = 10 ** (eq_preamp_db(filters) / 20)
+    nodes = [_raw_node("preamp", [(EQ_RATE, (gain, 0, 0, 1, 0, 0))])]
+    for i, f in enumerate(filters):
+        nodes.append(_raw_node(f"eq{i}", [(r, biquad_coeffs(f, r)) for r in EQ_RATES]))
+    names = ["preamp"] + [f"eq{i}" for i in range(len(filters))]
+    links = [f'{{ output = "{a}:Out" input = "{b}:In" }}' for a, b in zip(names, names[1:])]
+    label = SINKS[key][1]
+    nl = "\n                "
+    return f"""# generated by nova-chatmix - {label} EQ
+context.properties = {{ log.level = 0 }}
+context.spa-libs = {{
+    audio.convert.* = audioconvert/libspa-audioconvert
+    support.*       = support/libspa-support
+}}
+context.modules = [
+    {{ name = libpipewire-module-rt args = {{ }} flags = [ ifexists nofail ] }}
+    {{ name = libpipewire-module-protocol-native }}
+    {{ name = libpipewire-module-client-node }}
+    {{ name = libpipewire-module-adapter }}
+    {{ name = libpipewire-module-filter-chain
+        args = {{
+            node.description = {_spa_str("ChatMix " + label + " EQ")}
+            media.name       = {_spa_str("ChatMix " + label + " EQ")}
+            audio.channels   = 2
+            audio.position   = [ FL FR ]
+            filter.graph = {{
+                nodes = [{nl}{nl.join(nodes)}
+                ]
+                links = [{nl}{nl.join(links)}
+                ]
+                inputs  = [ "preamp:In" ]
+                outputs = [ "{names[-1]}:Out" ]
+            }}
+            capture.props = {{
+                node.name           = {_spa_str(f"nova_chatmix_eq_{key}_in")}
+                target.object       = {_spa_str(source_sink)}
+                stream.capture.sink = true
+                node.dont-reconnect = true
+            }}
+            playback.props = {{
+                node.name           = {_spa_str(f"nova_chatmix_eq_{key}")}
+                target.object       = {_spa_str(dac_sink)}
+                node.dont-reconnect = true
+                stream.dont-remix   = true
+            }}
+        }}
+    }}
+]
+"""
+
+
+class EqChain:
+    """One output's EQ: a `pipewire -c` child hosting the filter-chain."""
+
+    def __init__(self, key, filters, source_sink, dac_sink):
+        self.key, self.filters = key, filters
+        self.source_sink, self.dac_sink = source_sink, dac_sink
+        self.node = f"nova_chatmix_eq_{key}"
+        self.proc = None
+
+    def start(self):
+        exe = shutil.which("pipewire")
+        if not exe:
+            log.warning("%s EQ: the 'pipewire' program isn't installed", SINKS[self.key][1])
+            return False
+        rundir = os.path.dirname(STATE_PATH)
+        os.makedirs(rundir, exist_ok=True)
+        conf = os.path.join(rundir, f"eq-{self.key}.conf")
+        with open(conf, "w") as f:
+            f.write(eq_conf(self.key, self.filters, self.source_sink, self.dac_sink))
+        with open(os.path.join(rundir, f"eq-{self.key}.log"), "wb") as logf:
+            self.proc = subprocess.Popen([exe, "-c", conf], stdin=subprocess.DEVNULL,
+                                         stdout=logf, stderr=logf)
+        end = time.monotonic() + EQ_START_TIMEOUT_S
+        while time.monotonic() < end:
+            if self.proc.poll() is not None:
+                break
+            if self.linked():
+                return True
+            time.sleep(0.1)
+        log.warning("%s EQ didn't start (see %s/eq-%s.log); playing it without EQ",
+                    SINKS[self.key][1], rundir, self.key)
+        self.stop()
+        return False
+
+    def stream(self, inputs=None, sinks=None):
+        """(sink-input index, sink index) of the EQ's output into the DAC, or None."""
+        try:
+            inputs = pactl_json("sink-inputs") if inputs is None else inputs
+        except Exception:
+            return None
+        for si in inputs:
+            if (si.get("properties") or {}).get("node.name") == self.node:
+                return si.get("index"), si.get("sink")
+        return None
+
+    def linked(self, inputs=None, sinks=None):
+        if not self.alive():
+            return False
+        try:
+            sinks = pactl_json("sinks") if sinks is None else sinks
+        except Exception:
+            return False
+        dac = next((str(s.get("index")) for s in sinks if s.get("name") == self.dac_sink), None)
+        st = self.stream(inputs)
+        return dac is not None and st is not None and str(st[1]) == dac
+
+    def alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def stop(self):
+        if self.proc is None:
+            return
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(3)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+        self.proc = None
 
 
 class Audio:
@@ -372,6 +688,10 @@ class Audio:
         self.loop_ids = {}
         self.stream_idx = {}
         self.applied = {}
+        self.eq = {}          # output -> {"name", "filters"} wanted
+        self.chains = {}      # output -> running EqChain
+        self.eq_failed = set()
+        self.mix = (100, 100)
 
     def build(self):
         unload_stale_modules()
@@ -386,26 +706,80 @@ class Audio:
             if nid is None:
                 raise RuntimeError(f"could not create sink {name}")
             self.null_ids[key] = nid
-            base = [f"source={name}.monitor", f"sink={self.dac_sink}", "latency_msec=20"]
-            # *_dont_move stops WirePlumber re-routing the loopback if the DAC
-            # vanishes (worst case: into our own Game sink -> feedback loop).
-            lid = load_module("module-loopback", *base,
-                              "source_dont_move=true", "sink_dont_move=true")
-            if lid is None:
-                lid = load_module("module-loopback", *base)
-            if lid is None:
-                raise RuntimeError(f"could not route {name} to {self.dac_sink}")
-            self.loop_ids[key] = lid
+            self._link(key)
         if self.set_default:
             pactl("set-default-sink", SINKS["game"][0])
         log.info("outputs ready: %s -> %s",
                  ", ".join(SINKS[k][1] for k in self.keys), self.dac_sink)
 
+    def _link(self, key):
+        """Connect one output to the DAC: through its EQ if it has one."""
+        name = SINKS[key][0]
+        spec = self.eq.get(key)
+        if spec:
+            chain = EqChain(key, spec["filters"], name, self.dac_sink)
+            if chain.start():
+                self.chains[key] = chain
+                self.eq_failed.discard(key)
+                log.info("%s EQ on: %s", SINKS[key][1], spec["name"])
+                return
+            self.eq_failed.add(key)
+        base = [f"source={name}.monitor", f"sink={self.dac_sink}", "latency_msec=20"]
+        # *_dont_move stops WirePlumber re-routing the loopback if the DAC
+        # vanishes (worst case: into our own Game sink -> feedback loop).
+        lid = load_module("module-loopback", *base, "source_dont_move=true", "sink_dont_move=true")
+        if lid is None:
+            lid = load_module("module-loopback", *base)
+        if lid is None:
+            raise RuntimeError(f"could not route {name} to {self.dac_sink}")
+        self.loop_ids[key] = lid
+
+    def _unlink(self, key, ours=None):
+        chain = self.chains.pop(key, None)
+        if chain:
+            chain.stop()
+        if key in self.loop_ids:
+            idx = self.loop_ids.pop(key)
+            if ours is None:
+                try:
+                    ours = {i for i, _, arg in list_modules() if is_ours(arg)}
+                except Exception:
+                    ours = set()
+            if idx in ours:
+                unload_module(idx)
+        self.stream_idx.pop(key, None)
+        self.applied.pop(key, None)
+
+    def set_eq(self, eq):
+        """Apply a new set of EQs, restarting only the outputs that changed."""
+        eq = {k: v for k, v in eq.items() if k in self.keys}
+        changed = [k for k in self.keys if eq.get(k) != self.eq.get(k)]
+        self.eq = eq
+        if not changed or not self.null_ids:
+            return
+        for key in changed:
+            self._unlink(key)
+            self._link(key)
+            if key not in self.eq:
+                self.eq_failed.discard(key)
+                log.info("%s EQ off", SINKS[key][1])
+        self.set_mix(*self.mix)
+
     def teardown(self, restore_default=True):
-        for key in list(self.loop_ids):
-            unload_module(self.loop_ids.pop(key))
-        for key in list(self.null_ids):
-            unload_module(self.null_ids.pop(key))
+        # Only unload a module if it's still ours. When the DAC disappears,
+        # PipeWire removes our loopbacks itself and their numbers get reused,
+        # so a remembered number can point at someone else's module.
+        try:
+            ours = {idx for idx, _, arg in list_modules() if is_ours(arg)}
+        except Exception:
+            ours = set()
+        for key in list(self.chains):
+            self.chains.pop(key).stop()
+        for ids in (self.loop_ids, self.null_ids):
+            for key in list(ids):
+                idx = ids.pop(key)
+                if idx in ours:
+                    unload_module(idx)
         self.stream_idx.clear()
         self.applied.clear()
         try:
@@ -434,19 +808,28 @@ class Audio:
             return False
         dac_index = next(str(s.get("index")) for s in sinks if s.get("name") == self.dac_sink)
         linked = {str(si.get("owner_module")) for si in inputs if str(si.get("sink")) == dac_index}
-        return all(str(self.loop_ids.get(k)) in linked for k in self.keys)
+        for k in self.keys:
+            if k in self.chains:
+                if not self.chains[k].linked(inputs, sinks):
+                    return False
+            elif str(self.loop_ids.get(k)) not in linked:
+                return False
+        return True
 
     def _resolve_streams(self):
-        """Map each loopback module to the sink-input that plays into the DAC."""
-        wanted = {str(v): k for k, v in self.loop_ids.items()}
+        """Map each output to the stream that plays it into the DAC."""
+        by_module = {str(v): k for k, v in self.loop_ids.items()}
+        by_node = {c.node: k for k, c in self.chains.items()}
         for si in pactl_json("sink-inputs"):
-            key = wanted.get(str(si.get("owner_module")))
+            key = by_module.get(str(si.get("owner_module"))) or \
+                by_node.get((si.get("properties") or {}).get("node.name"))
             if key:
                 self.stream_idx[key] = si.get("index")
 
     def set_mix(self, game, chat):
-        # Volume goes on the loopback stream (Game/Chat -> DAC), so the
+        # Volume goes on the stream into the DAC (loopback or EQ), so the
         # Game/Chat sinks' own sliders stay free for you to use as normal.
+        self.mix = (game, chat)
         levels = {"game": game, "chat": chat, "media": 100}
         for key in self.keys:
             pct = levels[key]
@@ -463,7 +846,12 @@ class Audio:
                     self.applied[key] = pct
                     break
                 self.stream_idx.pop(key, None)  # stale index, look it up again
-        write_state({"outputs": self.keys, "levels": {k: self.applied.get(k) for k in self.keys}})
+        self.publish()
+
+    def publish(self):
+        write_state({"outputs": self.keys, "levels": {k: self.applied.get(k) for k in self.keys},
+                     "eq": {k: {"name": v["name"], "active": k in self.chains}
+                            for k, v in self.eq.items()}})
 
 
 def write_state(state):
@@ -640,6 +1028,8 @@ class RuleEnforcer:
             self.mtime = mtime
             self.rules = load_rules()
             self.apply()
+            self.audio.set_eq(load_eq())
+            self.audio.publish()
 
     def on_readable(self):
         try:
@@ -724,6 +1114,7 @@ class Daemon:
             self.sleep(3)
             return
         self.audio = Audio(sink, not self.args.no_media, not self.args.no_default)
+        self.audio.eq = load_eq()
         self.audio.build()
         self.audio.set_mix(100, 100)
         self.rules = RuleEnforcer(self.audio)
