@@ -44,6 +44,14 @@ if [[ "${1:-}" == "--uninstall" || "${1:-}" == "--purge" ]]; then
   exit 0
 fi
 
+# A copy here overrides the package (~/.local/bin comes first in PATH, and a unit in
+# ~/.config/systemd/user replaces the packaged one), so never install on top of it.
+if command -v pacman >/dev/null && pacman -Q nova-chatmix >/dev/null 2>&1; then
+  warn "nova-chatmix is installed as a package already - not installing a second copy over it."
+  warn "To update, rebuild the package instead. To remove an old copy from here: ./install.sh --uninstall"
+  exit 1
+fi
+
 for cmd in python3 pactl systemctl; do
   command -v "$cmd" >/dev/null || { warn "missing '$cmd' - install it first"; exit 1; }
 done
