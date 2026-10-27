@@ -69,6 +69,39 @@ peer["sock"].send(bytes([7, 0x45, 100, 25]) + bytes(12))
 check(wait(lambda: vol(next(s for s in pj("sink-inputs") if str(s["owner_module"]) == str(d.audio.loop_ids["chat"]))) == "25%"),
       "turning the dial turns Chat down")
 
+# --- Media on the dial: follows Chat's side while Chat is quiet (default "auto")
+def media_vol():
+    return vol(next(s for s in pj("sink-inputs") if str(s["owner_module"]) == str(d.audio.loop_ids["media"])))
+
+
+def save_settings(**kw):
+    tmp = svc.RULES_PATH + ".tmp"
+    json.dump(dict({"apps": {}}, **kw), open(tmp, "w"))
+    os.replace(tmp, svc.RULES_PATH)
+
+
+check(wait(lambda: media_vol() == "25%"), "solo (nothing in Chat): Media follows the dial too")
+import wave  # noqa: E402
+with wave.open(os.path.join(root, "call.wav"), "wb") as w:  # 6 s of silence: stands in for a voice call
+    w.setnchannels(2)
+    w.setsampwidth(2)
+    w.setframerate(48000)
+    w.writeframes(bytes(48000 * 6 * 4))
+call = subprocess.Popen(["pw-play", "--target", "ChatMix_Chat", os.path.join(root, "call.wav")])
+check(wait(lambda: media_vol() == "100%", 5), "a call starts in Chat: Media goes back to full by itself")
+call.wait()
+check(wait(lambda: media_vol() == "25%", 5), "call over: Media is back on the dial")
+save_settings(media_dial="never")
+check(wait(lambda: media_vol() == "100%"), "'never': Media stays at full")
+save_settings(media_dial="always")
+call = subprocess.Popen(["pw-play", "--target", "ChatMix_Chat", os.path.join(root, "call.wav")])
+time.sleep(1.5)
+check(media_vol() == "25%", "'always': Media follows the dial even during a call")
+call.kill()
+save_settings()
+check(wait(lambda: media_vol() == "25%" and json.load(open(svc.STATE_PATH)).get("media_dial") == "auto"),
+      "back to auto (the default); the window can see the mode")
+
 # --- the DAC blinks: reconnect + ChatMix back on
 peer["sock"].settimeout(0.2)
 try:

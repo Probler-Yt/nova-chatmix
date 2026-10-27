@@ -13,7 +13,8 @@
 On older Arctis headsets ChatMix was done in hardware. On the Nova Pro, SteelSeries moved it into their Windows-only Sonar software, so on Linux the dial on the GameDAC does nothing. nova-chatmix brings it back:
 
 - **The dial works again.** Turn it to balance game audio against voice chat, like on Windows. Press it to flip back to normal volume.
-- **Game, Chat and Media outputs** on the DAC. Media (music, videos) is never turned down by the dial.
+- **Game, Chat and Media outputs** on the DAC.
+- **Media rides the dial when you're solo.** With nobody in Chat, the dial balances Game against Media, so you can mix a game with a YouTube video without touching another volume slider. The moment a call starts in Chat it's Game vs Chat again, with Media back at full. (You can also put Media on the dial always, or never.)
 - **Drag-and-drop app routing.** Open *ChatMix*, drag Discord into Chat and your browser into Media. They go there automatically every time they make sound from then on, with the window closed. Your apps are grouped the way KDE System Monitor shows them, and Steam games appear under their real names (no Proton or anti-cheat clutter).
 - **Sonar EQ presets, per output.** Give Game, Chat and Media each their own EQ from SteelSeries' Sonar presets: hundreds of game presets (The Finals, Apex, CS2…) plus music, movie and chat ones, or load a preset file exported from SteelSeries GG. Measured through PipeWire, the curves land within a few hundredths of a dB of Sonar's (0.3 dB at worst), and the EQ can't make anything clip.
 - **No GUI needed to run.** A small systemd user service does the work. It survives unplugging the DAC and PipeWire restarts, and hands the dial back to normal volume when it stops.
@@ -54,6 +55,7 @@ This installs for your user only. The only part that needs `sudo` is a udev rule
 1. Everything plays through **Game** by default.
 2. Open **ChatMix**. Your open apps are listed under **Apps**. Drag one into **Chat**, **Media** or **Game** to assign it, and drag it back to **Apps** to unassign it. A green dot means the app is making sound right now.
 3. Turn the dial on the GameDAC: one way turns Chat down, the other turns Game down. Press the dial to switch between ChatMix and plain volume.
+4. Media follows the Chat side of the dial while nothing is playing in Chat (**Dial: Auto**, the default). Use the **Dial** button on the Media column to put it on the dial always (**On**) or never (**Off**).
 
 You can also pick the outputs by hand: `Game`, `Chat` and `Media` show up as normal output devices in your sound settings and in apps like Discord.
 

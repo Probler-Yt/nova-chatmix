@@ -49,6 +49,11 @@ COLUMNS = [  # key, label, accent  (key None = unassigned)
     ("game", "Game", "#E8A33D"),
 ]
 LABELS = {"chat": "Chat", "media": "Media", "game": "Game"}
+DIAL_MODES = {  # how the dial treats Media (setting "media_dial")
+    "auto": "Auto - on the dial while nobody's in Chat",
+    "always": "On - always turned down with Chat",
+    "never": "Off - always full volume",
+}
 MIME = "application/x-nova-chatmix-app"
 
 # Desktop plumbing that runs as its own "app" but isn't one you'd route.
@@ -287,16 +292,17 @@ def audio_snapshot():
             "title": (props.get("media.name") or "").strip(),
         })
     state = svc._read(svc.STATE_PATH)
-    eq_state = {}
+    eq_state, dial_state = {}, {}
     if state:  # the service publishes the dial position; more reliable than guessing
         try:
             st = json.loads(state)
             levels.update({k: v for k, v in st.get("levels", {}).items() if v is not None})
             eq_state = st.get("eq", {}) if isinstance(st.get("eq"), dict) else {}
+            dial_state = {"chat_busy": bool(st.get("chat_busy")), "media_on_dial": st.get("media_on_dial")}
         except ValueError:
             pass
     return {"present": present, "levels": levels, "streams": streams, "errors": errors,
-            "eq_state": eq_state}
+            "eq_state": eq_state, "dial": dial_state}
 
 
 def build_cards(apps, snap, rules, index=None):
@@ -374,6 +380,11 @@ def save_eq(output, spec):
         eq.pop(output, None)
     data["eq"] = eq
     _write_settings(data)
+
+
+def media_dial_setting():
+    mode = _read_settings().get("media_dial", "auto")
+    return mode if mode in DIAL_MODES else "auto"
 
 
 def current_eq():
@@ -626,7 +637,7 @@ class LevelBar(QWidget):
         self.update()
 
     def paintEvent(self, _):
-        if self.accent.alpha() == 0:
+        if self.accent.alpha() == 0 or getattr(self, "blank", False):
             return  # placeholder that only keeps the layout aligned
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
@@ -915,25 +926,40 @@ class Column(QFrame):
         outer.addLayout(head)
         self.caption = QLabel({None: "Not assigned · plays through Game",
                                "chat": "Turned down as you dial toward Game",
-                               "media": "The dial never touches this",
+                               "media": "Follows the dial while Chat is quiet",
                                "game": "Turned down as you dial toward Chat"}[key])
         self.caption.setObjectName("caption")
         self.caption.setWordWrap(True)
         outer.addWidget(self.caption)
-        # Media has no dial level, but keeps the (empty) bar's space so the
-        # EQ buttons line up across columns.
-        self.bar = LevelBar(accent if key in ("game", "chat") else "transparent")
+        self.bar = LevelBar(accent)
         self.bar.setVisible(key is not None)
         outer.addWidget(self.bar)
         self.accent = accent
-        self.eq_btn = None
+        self.dial_mode = None
+        self.eq_btn = self.dial_btn = None
         if key is not None:
+            buttons = QHBoxLayout()
+            buttons.setSpacing(6)
             self.eq_btn = QPushButton("EQ: Off")
             self.eq_btn.setObjectName("eqButton")
             self.eq_btn.setCursor(Qt.PointingHandCursor)
             self.eq_btn.setToolTip(f"Choose an EQ preset for everything in {label}")
             self.eq_btn.clicked.connect(lambda: self.win.edit_eq(self.key, self.accent))
-            outer.addWidget(self.eq_btn)
+            buttons.addWidget(self.eq_btn, 1)
+            if key == "media":
+                self.dial_btn = QPushButton("Dial: Auto")
+                self.dial_btn.setObjectName("eqButton")
+                self.dial_btn.setCursor(Qt.PointingHandCursor)
+                menu = QMenu(self.dial_btn)
+                for mode, text in DIAL_MODES.items():
+                    act = QAction(text, menu)
+                    act.setCheckable(True)
+                    act.setData(mode)
+                    act.triggered.connect(lambda _=False, m=mode: self.win.set_media_dial(m))
+                    menu.addAction(act)
+                self.dial_btn.setMenu(menu)
+                buttons.addWidget(self.dial_btn)
+            outer.addLayout(buttons)
         outer.addSpacing(2)
 
         self.list = QVBoxLayout()
@@ -969,8 +995,30 @@ class Column(QFrame):
         self.eq_btn.style().unpolish(self.eq_btn)
         self.eq_btn.style().polish(self.eq_btn)
 
+    def set_dial(self, mode, on_dial, chat_busy):
+        """Media only: how the dial treats it, and what it's doing right now."""
+        if self.dial_btn is None:
+            return
+        self.dial_mode = mode
+        self.dial_btn.setText({"auto": "Dial: Auto", "always": "Dial: On", "never": "Dial: Off"}[mode])
+        for act in self.dial_btn.menu().actions():
+            act.setChecked(act.data() == mode)
+        if mode == "never":
+            text = "The dial never touches this"
+        elif mode == "always":
+            text = "Turned down with Chat as you dial toward Game"
+        elif chat_busy:
+            text = "Chat's in use, so the dial is Game vs Chat"
+        else:
+            text = "Nobody in Chat: the dial is Game vs Media"
+        self.caption.setText(text)
+        self.bar.blank = on_dial is False  # keep its space so the buttons stay lined up
+        self.bar.update()
+        self.dial_btn.setToolTip("How the GameDAC's dial treats Media:\n" + "\n".join(DIAL_MODES.values()))
+
     def set_level(self, pct):
-        if self.key in ("game", "chat") and pct is not None:
+        dial = self.key in ("game", "chat") or (self.key == "media" and self.dial_mode != "never")
+        if dial and pct is not None:
             self.level.setText(f"{pct}%")
             self.bar.set_value(pct)
         else:
@@ -1132,6 +1180,13 @@ class Window(QWidget):
         self.reset_btn.setText("Reset DAC")
         self.refresh()
 
+    def set_media_dial(self, mode):
+        data = _read_settings()
+        data["media_dial"] = mode
+        _write_settings(data)
+        QTimer.singleShot(400, self.refresh)  # let the service apply it first
+        self.refresh()
+
     def edit_eq(self, output, accent):
         dlg = EqDialog(self, output, accent)
         dlg.exec()
@@ -1165,6 +1220,10 @@ class Window(QWidget):
         for key, col in self.columns.items():
             if key and key not in current_eq():
                 col.set_eq(None, None)
+        dial = snap.get("dial", {})
+        mode = media_dial_setting()
+        on_dial = dial.get("media_on_dial") if self.present else (mode != "never")
+        self.columns["media"].set_dial(mode, on_dial, dial.get("chat_busy", False))
         cards = build_cards(apps, snap, rules, self.index)
 
         if snap["errors"]:

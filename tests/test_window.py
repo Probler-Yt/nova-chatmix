@@ -178,5 +178,30 @@ dlg2.list.setCurrentRow(0)
 app.processEvents()
 dlg2.apply()
 check("chat" not in gui.current_eq(), "Off removes the EQ")
+# --- Media on the dial (state comes from the service's state file)
+def service_state(**kw):
+    os.makedirs(os.path.dirname(svc.STATE_PATH), exist_ok=True)
+    json.dump(dict({"levels": {"game": 100, "chat": 40, "media": 40}}, **kw), open(svc.STATE_PATH, "w"))
+    w.refresh()
+    app.processEvents()
+
+
+media = w.columns["media"]
+service_state(media_dial="auto", chat_busy=False, media_on_dial=True)
+check(media.dial_btn.text() == "Dial: Auto" and media.level.text() == "40%" and "Game vs Media" in media.caption.text(),
+      f"Auto, nobody in Chat: Media on the dial ({media.caption.text()!r}, {media.level.text()})")
+service_state(media_dial="auto", chat_busy=True, media_on_dial=False, levels={"game": 100, "chat": 40, "media": 100})
+check("Chat's in use" in media.caption.text() and media.bar.blank, "Auto during a call: says Chat's in use, Media off the dial")
+eq_before = gui.current_eq()
+next(a for a in media.dial_btn.menu().actions() if a.data() == "always").trigger()
+app.processEvents()
+data = json.load(open(svc.RULES_PATH))
+check(data.get("media_dial") == "always" and data.get("eq", {}) == eq_before and data.get("apps", {}).get("discord") == "chat",
+      "choosing On saves the mode and keeps EQ and app settings")
+check(media.dial_btn.text() == "Dial: On" and [a.data() for a in media.dial_btn.menu().actions() if a.isChecked()] == ["always"],
+      "button and menu show the new mode")
+next(a for a in media.dial_btn.menu().actions() if a.data() == "never").trigger()
+service_state(media_dial="never", chat_busy=False, media_on_dial=False, levels={"game": 100, "chat": 40, "media": 100})
+check(media.level.text() == "" and "never" in media.caption.text(), "Off: no dial level shown for Media")
 w.close()
 check.done()

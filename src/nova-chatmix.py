@@ -8,6 +8,9 @@ What it does:
     through the GameDAC (Media is never turned down by the dial).
   * Tells the DAC to put its dial into ChatMix mode.
   * Listens for dial movements and turns Game / Chat up and down to match.
+    Media can ride the dial too: by default it follows the Chat side whenever
+    nothing is playing in Chat, so solo you balance your game against YouTube,
+    and in a call it's Game against Chat again.
   * Optional per-output EQ (Sonar-style parametric presets), run as a PipeWire
     filter-chain between each output and the DAC.
   * Runs as a systemd user service, survives unplug/replug and PipeWire
@@ -25,7 +28,7 @@ used: unknown ones get a USB STALL and can wedge it until a replug.
 Only needs Python 3 (stdlib) and pactl (pipewire-pulse).
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 import argparse
 import errno
@@ -522,6 +525,21 @@ def eq_preamp_db(filters):
     return -math.ceil(max(peak, 0.0) * 10) / 10
 
 
+MEDIA_DIAL_MODES = ("auto", "always", "never")
+CHAT_CHECK_MIN_S = 0.5
+
+
+def load_media_dial():
+    """How the dial treats Media: "auto" (with Chat's side while Chat is quiet),
+    "always" (always with Chat's side) or "never" (always full)."""
+    try:
+        with open(RULES_PATH) as f:
+            mode = json.load(f).get("media_dial", "auto")
+    except (OSError, ValueError, AttributeError):
+        mode = "auto"
+    return mode if mode in MEDIA_DIAL_MODES else "auto"
+
+
 def load_eq():
     """{output: {"name": ..., "filters": [...]}} from the settings file."""
     try:
@@ -692,6 +710,8 @@ class Audio:
         self.chains = {}      # output -> running EqChain
         self.eq_failed = set()
         self.mix = (100, 100)
+        self.media_dial = "auto"
+        self.chat_busy = False
 
     def build(self):
         unload_stale_modules()
@@ -830,7 +850,7 @@ class Audio:
         # Volume goes on the stream into the DAC (loopback or EQ), so the
         # Game/Chat sinks' own sliders stay free for you to use as normal.
         self.mix = (game, chat)
-        levels = {"game": game, "chat": chat, "media": 100}
+        levels = {"game": game, "chat": chat, "media": chat if self.media_on_dial() else 100}
         for key in self.keys:
             pct = levels[key]
             if self.applied.get(key) == pct:
@@ -848,10 +868,37 @@ class Audio:
                 self.stream_idx.pop(key, None)  # stale index, look it up again
         self.publish()
 
+    def media_on_dial(self):
+        return self.media_dial == "always" or (self.media_dial == "auto" and not self.chat_busy)
+
+    def chat_in_use(self):
+        """Is anything playing into Chat right now (a voice call, say)?"""
+        sinks = pactl_json("sinks")
+        chat = next((str(s.get("index")) for s in sinks if s.get("name") == SINKS["chat"][0]), None)
+        if chat is None:
+            return False
+        return any(str(si.get("sink")) == chat and not si.get("corked") for si in pactl_json("sink-inputs"))
+
+    def update_chat_busy(self):
+        """Re-check Chat; move Media on or off the dial if that changed."""
+        try:
+            busy = self.chat_in_use()
+        except Exception:
+            return
+        if busy == self.chat_busy:
+            return
+        self.chat_busy = busy
+        if "media" in self.keys and self.media_dial == "auto":
+            log.info("%s", "Chat in use - Media back to full, the dial is Game vs Chat" if busy else
+                     "Chat quiet - Media follows the dial (Game vs Media)")
+        self.set_mix(*self.mix)
+
     def publish(self):
         write_state({"outputs": self.keys, "levels": {k: self.applied.get(k) for k in self.keys},
                      "eq": {k: {"name": v["name"], "active": k in self.chains}
-                            for k, v in self.eq.items()}})
+                            for k, v in self.eq.items()},
+                     "media_dial": self.media_dial, "chat_busy": self.chat_busy,
+                     "media_on_dial": self.media_on_dial()})
 
 
 def write_state(state):
@@ -998,6 +1045,7 @@ class RuleEnforcer:
         self.buf = b""
         self.rules = {}
         self.mtime = None
+        self.streams_changed = True
 
     def start(self):
         self.stop()
@@ -1029,7 +1077,11 @@ class RuleEnforcer:
             self.rules = load_rules()
             self.apply()
             self.audio.set_eq(load_eq())
-            self.audio.publish()
+            mode = load_media_dial()
+            if mode != self.audio.media_dial:
+                log.info("Media on the dial: %s", mode)
+            self.audio.media_dial = mode
+            self.audio.set_mix(*self.audio.mix)
 
     def on_readable(self):
         try:
@@ -1040,6 +1092,8 @@ class RuleEnforcer:
             return
         self.buf += chunk
         *lines, self.buf = self.buf.split(b"\n")
+        if any(b"on sink-input" in line for line in lines):
+            self.streams_changed = True
         new = {int(m.group(1)) for l in lines
                if (m := self.NEW_STREAM.search(l.decode(errors="replace")))}
         if new:
@@ -1115,6 +1169,7 @@ class Daemon:
             return
         self.audio = Audio(sink, not self.args.no_media, not self.args.no_default)
         self.audio.eq = load_eq()
+        self.audio.media_dial = load_media_dial()
         self.audio.build()
         self.audio.set_mix(100, 100)
         self.rules = RuleEnforcer(self.audio)
@@ -1124,13 +1179,19 @@ class Daemon:
         self.arm_dac()
         log.info("ChatMix enabled on the dial (press the dial to switch volume/ChatMix)")
 
-        last_check = time.monotonic()
+        last_check = last_chat_check = time.monotonic()
         while self.running:
             watch = [self.dac.fd] + ([self.rules.fileno()] if self.rules.alive() else [])
             ready, _, _ = select.select(watch, [], [], 1.0)
             if self.rules.alive() and self.rules.fileno() in ready:
                 self.rules.on_readable()
             self.rules.reload()  # picks up changes made in the ChatMix window
+            now = time.monotonic()
+            if (self.rules.streams_changed and now - last_chat_check > CHAT_CHECK_MIN_S) or \
+                    now - last_chat_check > HEALTH_CHECK_S:
+                self.rules.streams_changed = False
+                last_chat_check = now
+                self.audio.update_chat_busy()
             if self.dac.fd in ready:
                 latest = None
                 for report in self.dac.read_reports():
@@ -1149,7 +1210,7 @@ class Daemon:
                 if not self.audio.healthy():
                     log.warning("lost the connection to the GameDAC's audio (DAC reset or "
                                 "PipeWire restart?) - reconnecting")
-                    game, chat = self.audio.applied.get("game", 100), self.audio.applied.get("chat", 100)
+                    game, chat = self.audio.mix
                     self.audio.teardown(restore_default=False)
                     sink = self.wait_for_dac_sink(10)
                     if not sink:

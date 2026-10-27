@@ -65,11 +65,12 @@ check(vols() == {"ChatMix_Game": "100%", "ChatMix_Chat": "100%", "ChatMix_Media"
 
 dial(100, 30)
 time.sleep(1.3)
-check(vols() == {"ChatMix_Game": "100%", "ChatMix_Chat": "30%", "ChatMix_Media": "100%"}, f"dial toward game: {vols()}")
+check(vols() == {"ChatMix_Game": "100%", "ChatMix_Chat": "30%", "ChatMix_Media": "30%"},
+      f"dial toward game: Chat down, and Media too while nothing plays in Chat: {vols()}")
 for g in (90, 70, 50, 40):
     dial(g, 100)
 time.sleep(1.3)
-check(vols()["ChatMix_Game"] == "40%" and vols()["ChatMix_Media"] == "100%", "burst of turns: last position wins, Media untouched")
+check(vols()["ChatMix_Game"] == "40%" and vols()["ChatMix_Media"] == "100%", "burst of turns: last position wins")
 peer["sock"].send(bytes([7, 0x25, 30]) + bytes(13))
 time.sleep(1.2)
 check(vols()["ChatMix_Game"] == "40%", "unrelated reports ignored")

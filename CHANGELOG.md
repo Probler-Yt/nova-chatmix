@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.0
+
+- **Media on the dial.** By default (Auto), Media follows the Chat side of the dial whenever nothing is playing in Chat, so solo you balance your game against YouTube with the dial; as soon as anything plays in Chat (a call) it's Game vs Chat again and Media goes back to full. Switch it to always or never with the new Dial button on the Media column.
+
 ## 1.1.0
 
 - **EQ per output, with SteelSeries Sonar presets.** Each of Game, Chat and Media can have its own EQ: pick from Sonar's presets (hundreds of games plus music, movie and chat ones) with a search box and a curve preview, or load a Sonar preset file. Measured through PipeWire, the result lands within a few hundredths of a dB of Sonar's curves (0.3 dB at worst), can't clip (an automatic preamp), and adds no delay: the EQ path skips the plain loopback's 20 ms buffer.
