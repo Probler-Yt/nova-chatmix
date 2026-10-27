@@ -11,6 +11,6 @@ pkgbase = nova-chatmix
 	depends = pyside6
 	optdepends = pipewire-pulse: the sound server it is built and tested for (the EQ also needs pipewire itself)
 	source = nova-chatmix-1.2.0.tar.gz::https://github.com/Probler-Yt/nova-chatmix/releases/download/v1.2.0/nova-chatmix-1.2.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = a71136398c9f1a19c287397017334d6ce80ade0291e8e63c0a59124e8f7a0a0f
 
 pkgname = nova-chatmix
