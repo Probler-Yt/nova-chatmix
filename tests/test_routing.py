@@ -7,7 +7,7 @@ import time
 import types
 
 import fixtures
-from common import Checks, fake_dac, fake_pactl, load_service
+from common import Checks, fake_dac, fake_pactl, load_service, change_state, read_state, wait_for, write_json, write_state
 
 tmp = fake_pactl("full")
 svc = load_service()
@@ -30,58 +30,57 @@ def P(name, binary):
 
 
 def where():
-    return {s["index"]: s["sink"].replace("ChatMix_", "") for s in json.load(open(SF))["streams"]}
+    return {s["index"]: s["sink"].replace("ChatMix_", "") for s in read_state()["streams"]}
 
 
 def new_stream(index, client_pid, props, sink=G):
-    st = json.load(open(SF))
     cid = 100 + index
-    st["clients"].append({"index": cid, "properties": {"pipewire.sec.pid": str(client_pid)}})
-    st["streams"].append({"index": index, "client": cid, "sink": sink, "props": props})
-    json.dump(st, open(SF, "w"))
+
+    def add(st):
+        st["clients"].append({"index": cid, "properties": {"pipewire.sec.pid": str(client_pid)}})
+        st["streams"].append({"index": index, "client": cid, "sink": sink, "props": props})
+    change_state(add)
     with open(SF + ".events", "a") as f:
         f.write(f"Event 'new' on sink-input #{index}\n")
 
 
-json.dump({"apps": {"steam:2073850": "game", "discord": "chat", "brave-browser": "media"}}, open(RULES, "w"))
-json.dump({"clients": [{"index": 70, "properties": {"pipewire.sec.pid": "1013"}},
+write_json(RULES, {"apps": {"steam:2073850": "game", "discord": "chat", "brave-browser": "media"}})
+write_state({"clients": [{"index": 70, "properties": {"pipewire.sec.pid": "1013"}},
                        {"index": 71, "properties": {"pipewire.sec.pid": "1030"}},
                        {"index": 72, "properties": {"pipewire.sec.pid": "1020"}},
                        {"index": 73, "properties": {"pipewire.sec.pid": "900"}}],
            "streams": [{"index": 21, "client": 70, "sink": G, "props": P("Discovery.exe", "wine64-preloader")},
                        {"index": 22, "client": 71, "sink": G, "props": P("Discord", "Discord")},
                        {"index": 24, "client": 72, "sink": G, "props": P("Brave", "brave")},
-                       {"index": 25, "client": 73, "sink": G, "props": P("plasmashell", "plasmashell")}]},
-          open(SF, "w"))
+                       {"index": 25, "client": 73, "sink": G, "props": P("plasmashell", "plasmashell")}]})
 
 d = svc.Daemon(types.SimpleNamespace(sink=None, no_media=False, no_default=False, boot_wait=0.0, verbose=False))
 t = threading.Thread(target=d.run, daemon=True)
 t.start()
-time.sleep(2)
+wait_for(lambda: where()[22] == "Chat" and where()[24] == "Media")
 w = where()
 check(w[22] == "Chat" and w[24] == "Media", f"already-playing apps moved on startup: {w}")
 check(w[21] == "Game" and w[25] == "Game", "THE FINALS and system sounds left where they are")
 
-json.dump({"apps": {"steam:2073850": "game", "discord": "chat", "brave-browser": "media", "notion-app": "chat"}},
-          open(RULES, "w"))
-time.sleep(1.2)
+write_json(RULES, {"apps": {"steam:2073850": "game", "discord": "chat", "brave-browser": "media",
+                            "notion-app": "chat"}})
+time.sleep(1.2)  # the service picks up the new rule
 new_stream(30, 1040, P("Notion", "notion-app"))
-time.sleep(1.5)
+wait_for(lambda: where()[30] == "Chat")
 check(where()[30] == "Chat", "app assigned while silent goes to Chat the moment it plays")
 new_stream(31, 1014, P("denuvo", "wine64-preloader"), sink="ChatMix_Chat")
-time.sleep(1.5)
+wait_for(lambda: where()[31] == "Game")
 check(where()[31] == "Game", "a Proton helper with the game's Steam app id follows the game's rule")
 
-st = json.load(open(SF))
-st["streams"].append({"index": 32, "client": 999, "sink": G, "props": P("Spotify", "spotify")})
-json.dump(st, open(SF, "w"))
-json.dump({"apps": {"spotify": "media"}}, open(RULES, "w"))  # a rule from an older version
-time.sleep(1.5)
+change_state(lambda st: st["streams"].append({"index": 32, "client": 999, "sink": G,
+                                              "props": P("Spotify", "spotify")}))
+write_json(RULES, {"apps": {"spotify": "media"}})  # a rule from an older version
+wait_for(lambda: where()[32] == "Media")
 check(where()[32] == "Media", "older binary-name rules still work")
 
 state = json.load(open(svc.STATE_PATH))
 check(state["levels"] == {"game": 100, "chat": 100, "media": 100}, "dial position published for the window")
-moves = [c for c in json.load(open(SF))["calls"] if c.startswith("move-sink-input")]
+moves = [c for c in read_state()["calls"] if c.startswith("move-sink-input")]
 check(all(not c.startswith("move-sink-input 5") for c in moves), "never moves its own loopbacks")
 check(len(moves) == len(set(moves)), "no repeated moves")
 d.stop()

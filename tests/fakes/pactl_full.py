@@ -13,6 +13,8 @@ if a == ["subscribe"]:
         else: time.sleep(0.05)
 lock = open(SF + ".lock", "w"); fcntl.flock(lock, fcntl.LOCK_EX)
 st = json.load(open(SF)) if os.path.exists(SF) else {}
+def save():
+    json.dump(st, open(SF + ".tmp", "w")); os.replace(SF + ".tmp", SF)  # never half-written
 st.setdefault("next", 100); st.setdefault("modules", {}); st.setdefault("streams", []); st.setdefault("vol", {})
 st.setdefault("default", DAC); st.setdefault("calls", [])
 st["calls"].append(" ".join(a))
@@ -51,7 +53,7 @@ text_mode = a[:1] == ["list"] and len(a) == 2
 if text_mode:
     a = ["-f", "json", "list", a[1]]
 elif a[:3] == ["-f", "json", "list"] and os.environ.get("FAKE_BROKEN_JSON"):
-    print('[{"index": 12, "properties": {"media.name": "bro'); json.dump(st, open(SF, "w")); sys.exit(0)
+    print('[{"index": 12, "properties": {"media.name": "bro'); save(); sys.exit(0)
 if a == ["list", "modules", "short"]:
     out = "\n".join(f"{i}\t{m['name']}\t{' '.join(m['args'])}\t" for i, m in sorted(st["modules"].items()))
 elif a[:3] == ["-f", "json", "list"]:
@@ -83,7 +85,7 @@ elif a[0] == "move-sink-input":
         if str(s["index"]) == a[1] and idx_of(a[2]) is not None: s["sink"] = a[2]; event(f"Event 'change' on sink-input #{a[1]}")
 elif a[0] == "get-default-sink": out = st["default"]
 elif a[0] == "set-default-sink": st["default"] = a[1]
-json.dump(st, open(SF, "w"))
+save()
 if text_mode and out:
     out = render_text(a[3], json.loads(out))
 print(out); sys.exit(rc)

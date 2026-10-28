@@ -55,6 +55,77 @@ def fake_dac(svc, peer):
     svc.Dac = make
 
 
+def _locked():
+    import fcntl
+    f = open(os.environ["FAKE_PACTL_STATE"] + ".lock", "w")
+    fcntl.flock(f, fcntl.LOCK_EX)
+    return f
+
+
+def read_state():
+    """The fake pactl's state, read while no fake pactl is writing it."""
+    import json
+    with _locked():
+        with open(os.environ["FAKE_PACTL_STATE"]) as f:
+            return json.load(f)
+
+
+def write_state(st):
+    with _locked():
+        _save(st)
+
+
+def change_state(fn):
+    """fn(state) edits the fake PipeWire's state in place, under the lock."""
+    import json
+    with _locked():
+        with open(os.environ["FAKE_PACTL_STATE"]) as f:
+            st = json.load(f)
+        fn(st)
+        _save(st)
+
+
+def write_json(path, data):
+    """Write a settings file atomically, the way the window does."""
+    import json
+    with open(path + ".tmp", "w") as f:
+        json.dump(data, f)
+    os.replace(path + ".tmp", path)
+
+
+def update_state(**kw):
+    """Change the fake PipeWire's state without losing a concurrent fake pactl's write."""
+    import json
+    with _locked():
+        with open(os.environ["FAKE_PACTL_STATE"]) as f:
+            st = json.load(f)
+        st.update(kw)
+        _save(st)
+        return st
+
+
+def _save(st):
+    import json
+    sf = os.environ["FAKE_PACTL_STATE"]
+    with open(sf + ".tmp", "w") as f:
+        json.dump(st, f)
+    os.replace(sf + ".tmp", sf)
+
+
+def wait_for(cond, secs=10, step=0.05):
+    """Poll until cond() is true (slow CI machines need more than a fixed sleep)."""
+    import time
+    end = time.time() + secs
+    while time.time() < end:
+        try:
+            if cond():
+                return True
+        except (KeyError, ValueError, OSError):
+            pass
+        time.sleep(step)
+    return False
+
+
 class Checks:
     def __init__(self):
         self.fails = 0

@@ -5,7 +5,7 @@ import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import fixtures  # noqa: E402
-from common import SRC, Checks, fake_pactl, load  # noqa: E402
+from common import SRC, Checks, fake_pactl, load, read_state  # noqa: E402
 
 try:
     import PySide6  # noqa: F401
@@ -141,7 +141,7 @@ def drop(card, key):
 drop(next(c.card for c in w.columns[None].cards() if c.card["name"] == "Notion"), "chat")
 check(("Notion", "open") in col("chat") and svc.load_rules().get("notion-app") == "chat", "drag Notion into Chat")
 drop(next(c.card for c in w.columns["game"].cards() if c.card["name"] == "THE FINALS"), None)
-st = json.load(open(os.environ["FAKE_PACTL_STATE"]))
+st = read_state()
 check(("THE FINALS", "playing") in col(None) and "steam:2073850" not in svc.load_rules()
       and next(s for s in st["streams"] if s["index"] == 21)["sink"] == st["default"],
       "drag back to Apps: unassigned and its audio goes back to the default output")

@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # Fake pactl backed by a JSON state file, for testing nova-chatmix.
-import json, os, sys
+import fcntl, json, os, sys
 SF = os.environ["FAKE_PACTL_STATE"]
+lock = open(SF + ".lock", "w"); fcntl.flock(lock, fcntl.LOCK_EX)  # one reader/writer at a time
 st = json.load(open(SF)) if os.path.exists(SF) else {}
+def save():
+    json.dump(st, open(SF + ".tmp", "w")); os.replace(SF + ".tmp", SF)  # never half-written
 st.setdefault("next", 536870913); st.setdefault("modules", {}); st.setdefault("log", [])
 st.setdefault("default", "alsa_output.usb-SteelSeries_Arctis_Nova_Pro_Wired-00.analog-stereo")
 st.setdefault("dac_present", True); st.setdefault("fail_dont_move", False)
@@ -40,5 +43,5 @@ elif a[0] == "set-sink-input-volume":
     st.setdefault("vol", {})[a[1]] = a[2]
 elif a[0] == "get-default-sink": out = st["default"]
 elif a[0] == "set-default-sink": st["default"] = a[1]
-json.dump(st, open(SF, "w"))
+save()
 print(out); sys.exit(rc)
