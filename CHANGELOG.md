@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.0
+
+- **A new window, laid out like Sonar.** Tabs along the top: Mixer, Chat, Media, Game. The Mixer page has the drag-and-drop lanes plus a gauge showing where the dial sits. Each channel page shows its preset, an EQ on/off switch, 9 favourite slots and a large curve.
+- **A proper preset browser.** Slides up over the channel page, with search and categories: Your games (presets for games installed on Steam), Games, Pro players, General, Music, Movies and shows, Voice, My presets and Favourites. Every preset shows its curve and a short description of what it does. Click to use a preset, star it to pin it.
+- **Suggestions:** when a game with its own Sonar preset is playing, the Game page offers it.
+- Switching the EQ off remembers the preset, so switching it back on restores it.
+- Imported preset files are kept in My presets.
+- New look: a dark theme with each channel in its own colour.
+- Reset the GameDAC moved to the ⋯ menu.
+- install.sh won't install a second copy over the AUR/pacman package (a copy in your home folder overrides the package).
+
 ## 1.2.0
 
 - **Media on the dial.** By default (Auto), Media follows the Chat side of the dial whenever nothing is playing in Chat, so solo you balance your game against YouTube with the dial; as soon as anything plays in Chat (a call) it's Game vs Chat again and Media goes back to full. Switch it to always or never with the new Dial button on the Media column.

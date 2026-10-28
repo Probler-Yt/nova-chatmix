@@ -55,6 +55,40 @@ os.makedirs(os.path.dirname(svc.RULES_PATH))
 json.dump({"apps": {"discord": "chat", "brave": "media", "denuvo-anti-cheat-update-service.exe": "game",
                     "steam:3058630": "game"}}, open(svc.RULES_PATH, "w"))
 
+# Sonar downloads stubbed before the window exists: CI must not depend on the internet
+import tempfile  # noqa: E402
+import time  # noqa: E402
+SAMPLE_JSON = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_preset.json"), "rb").read()
+served = []
+MANIFEST = ["Alpha Strike [Game].json", "Big Bass Movie [Game].json", "Clear Voices [Chat].json",
+            "Boom Mic [Mic].json", "The finals [Game].json", "Music - Deep Bass [Game].json", "Flat [Chat].json"]
+
+
+def fake_get(url, timeout=10):
+    served.append(url)
+    if url == gui.SONAR_MANIFEST:
+        return json.dumps({"presets": MANIFEST}).encode()
+    if url.endswith("Flat%20%5BChat%5D.json"):
+        return json.dumps({"parametricEQ": {"enabled": True, "filter1": {"enabled": True, "type": "peakingEQ",
+                                                                        "frequency": 1000, "qFactor": 1, "gain": 0}}}).encode()
+    if url.startswith(gui.SONAR_FILE):
+        return SAMPLE_JSON
+    raise OSError("unexpected URL " + url)
+
+
+def pump(cond, secs=10):
+    end = time.time() + secs
+    while time.time() < end:
+        app.processEvents()
+        if cond():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+gui._http_get = fake_get
+gui.SONAR_CACHE = tempfile.mkdtemp()
+
 check = Checks()
 app = QApplication(sys.argv)
 app.setStyle(QStyleFactory.create("Fusion"))
@@ -76,7 +110,8 @@ def col(k):
 
 
 names = [n for k in (None, "chat", "media", "game") for n, _ in col(k)]
-check(w.columns["media"].isVisible(), "Media column shown")
+check(w.columns["media"].isVisible(), "Media lane shown")
+check(w.stack.currentWidget() is w.mixer and w.tabs["mixer"].isChecked(), "opens on the Mixer page")
 check(("THE FINALS", "playing") in col("game"), "THE FINALS: one card, real name, playing, in Game")
 check(("Assetto Corsa EVO", "closed") in col("game"), "assigned game that's closed shows its name, not its id")
 check(col("chat") == [("Discord", "playing")], "Discord in Chat")
@@ -112,72 +147,141 @@ check(("THE FINALS", "playing") in col(None) and "steam:2073850" not in svc.load
       "drag back to Apps: unassigned and its audio goes back to the default output")
 calls = []
 svc.reset_dac = lambda: calls.append(1) or 0
-w.reset_btn.click()
+w.reset_action.trigger()
 app.processEvents()
-check(calls == [1] and not w.reset_btn.isEnabled(), "Reset DAC button resets the DAC and waits for it to come back")
-# --- EQ picker (downloads stubbed: CI must not depend on the internet)
-import tempfile  # noqa: E402
-SAMPLE_JSON = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_preset.json"), "rb").read()
-served = []
+check(calls == [1] and not w.reset_action.isEnabled(), "Reset the GameDAC (in the ⋯ menu) resets it and waits for it")
 
+# --- preset catalogue (plain functions)
+names = ["The finals [Game].json", "CS2 by FaZe [Game].json", "CS2 Pro Preset [Game].json",
+         "Music - Deep Bass [Game].json", "Movie_ Immersion [Game].json", "Podcast [Game].json",
+         "Clarity [Chat].json", "Boom Mic [Mic].json", "Assetto Corsa [Game].json", "Assetto Corsa EVO [Game].json",
+         "The Witcher 3 [Game].json", "Anno 117_ Pax Romana [Game].json"]
+cats = {n: gui.preset_category(n) for n in names}
+check(cats == {"The finals [Game].json": "games", "CS2 by FaZe [Game].json": "pro", "CS2 Pro Preset [Game].json": "pro",
+               "Music - Deep Bass [Game].json": "music", "Movie_ Immersion [Game].json": "movie",
+               "Podcast [Game].json": "general", "Clarity [Chat].json": "voice", "Boom Mic [Mic].json": "mic",
+               "Assetto Corsa [Game].json": "games", "Assetto Corsa EVO [Game].json": "games",
+               "The Witcher 3 [Game].json": "games", "Anno 117_ Pax Romana [Game].json": "games"},
+      f"Sonar's presets sorted into proper categories: {cats}")
+check(gui.preset_title("Music - Deep Bass [Game].json") == "Music: Deep Bass"
+      and gui.preset_title("Anno 117_ Pax Romana [Game].json") == "Anno 117: Pax Romana", "preset names tidied")
+cat = gui.build_catalogue(names, ["THE FINALS", "Counter-Strike 2", "Assetto Corsa EVO", "The Witcher 3: Wild Hunt",
+                                  "Dolphin"])
+yours = sorted(e["title"] for e in cat if e["yours"])
+check(yours == ["Assetto Corsa EVO", "CS2 Pro Preset", "CS2 by FaZe", "The Witcher 3", "The finals"],
+      f"'Your games' finds presets for installed games, by name, alias or prefix: {yours}")
+check(not any(e["cat"] == "mic" for e in cat), "microphone presets left out")
+check([e["title"] for e in gui.filter_catalogue(cat, "games", "deep")] == ["Music: Deep Bass"],
+      "searching looks through every category")
+check([e["source"] for e in gui.filter_catalogue(cat, "fav", "", ["Podcast [Game].json", "gone.json"])] ==
+      ["Podcast [Game].json"], "Favourites list keeps your order and skips presets that vanished")
+freqs = svc.log_freqs(56)
+bass = svc.eq_response_db([{"type": "bq_lowshelf", "freq": 120.0, "q": 0.707, "gain": 6.0}], freqs)
+check(gui.shape_words(bass, freqs) == "More bass" and gui.shape_words([0.0] * 56, freqs) == "Close to flat",
+      "curves described in words (More bass / Close to flat)")
 
-def fake_get(url, timeout=10):
-    served.append(url)
-    if url == gui.SONAR_MANIFEST:
-        return json.dumps({"presets": ["Alpha Strike [Game].json", "Big Bass Movie [Game].json",
-                                       "Clear Voices [Chat].json", "Boom Mic [Mic].json"]}).encode()
-    if url.startswith(gui.SONAR_FILE):
-        return SAMPLE_JSON
-    raise OSError("unexpected URL " + url)
-
-
-gui._http_get = fake_get
-gui.SONAR_CACHE = tempfile.mkdtemp()
-
-
-def pump(cond, secs=10):
-    import time
-    end = time.time() + secs
-    while time.time() < end:
-        app.processEvents()
-        if cond():
-            return True
-        time.sleep(0.02)
-    return False
-
-
-check(all(w.columns[k].eq_btn is not None for k in ("chat", "media", "game")) and w.columns[None].eq_btn is None,
-      "Chat, Media and Game each have an EQ button (Apps doesn't)")
-dlg = gui.EqDialog(w, "chat", "#22B59A")
-dlg.show()
-check(pump(lambda: dlg.list.count() == 4), "preset list loads (microphone presets left out)")
-check(dlg.list.item(1).text().startswith("Clear Voices"), "Chat presets listed first in the Chat column")
-dlg.search.setText("bass")
+# --- the channel pages
+check(pump(lambda: w.manifest_names == MANIFEST), "Sonar preset list downloaded in the background")
+check(set(w.tabs) == {"mixer", "chat", "media", "game"}, "tabs: Mixer, Chat, Media, Game")
+chat = w.channels["chat"]
+w.show_page("chat")
 app.processEvents()
-visible = [dlg.list.item(i).text() for i in range(dlg.list.count()) if not dlg.list.item(i).isHidden()]
-check(visible == ["Off (no EQ)", "Big Bass Movie"], f"search filters the list: {visible}")
-dlg.list.setCurrentItem(next(dlg.list.item(i) for i in range(dlg.list.count())
-                             if dlg.list.item(i).text() == "Big Bass Movie"))
-check(pump(lambda: bool(dlg.chosen and dlg.chosen.get("filters"))), f"choosing one downloads and previews it: {dlg.info.text()}")
-dlg.apply()
-saved = gui.current_eq().get("chat", {})
-check(saved.get("source") == "Big Bass Movie [Game].json" and len(saved.get("filters", [])) == 8, "Apply saves it for Chat")
+check(w.stack.currentWidget() is chat and chat.name.text() == "No EQ" and not chat.toggle.isChecked(),
+      "Chat page with no EQ chosen yet")
+check(chat.favs.items == gui.DEFAULT_FAVOURITES["chat"], "starts with a few sensible favourites")
+chat.open_drawer()
+check(pump(lambda: chat.drawer.pos().y() < chat.height() and chat.drawer.isVisible()), "browse drawer slides up")
+check(chat.drawer.category == "voice" and [e["title"] for e in chat.drawer.grid.entries] == ["Clear Voices", "Flat"],
+      f"Chat opens on Voice presets: {[e['title'] for e in chat.drawer.grid.entries]}")
+cat_keys = [k for k, _ in chat.drawer.cats.cats]
+check("yours" in cat_keys and "music" in cat_keys and "mine" in cat_keys,
+      f"categories with presets in them (plus My presets and Favourites): {cat_keys}")
+check(pump(lambda: w.store.mini("Clear Voices [Chat].json") is not None), "each tile's curve is downloaded to draw it")
+chat.drawer.search.setText("bass")
+app.processEvents()
+check([e["title"] for e in chat.drawer.grid.entries] == ["Big Bass Movie", "Music: Deep Bass"] and chat.drawer.grid.searching,
+      "search finds presets in every category")
+chat.drawer.search.clear()
+chat.drawer.grid.activated.emit("Big Bass Movie [Game].json")
+check(pump(lambda: gui.current_eq().get("chat", {}).get("source") == "Big Bass Movie [Game].json"),
+      "clicking a preset uses it straight away")
+saved = gui.current_eq()["chat"]
+check(saved["name"] == "Big Bass Movie" and len(saved["filters"]) == 8, "saved with its filters for the service")
 check(svc.load_rules().get("discord") == "chat", "app assignments survive saving an EQ")
+check(chat.name.text() == "Big Bass Movie" and chat.toggle.isChecked() and chat.display.values is not None,
+      "page shows the preset, EQ switched on and its curve")
+check(w.columns["chat"].eq_btn.text() == "EQ: Big Bass Movie", f"Mixer lane shows it: {w.columns['chat'].eq_btn.text()!r}")
+n_before = len(served)
+w.choose_preset("chat", "Big Bass Movie [Game].json")
+check(len(served) == n_before, "a preset used before comes from memory (no download)")
+chat.toggle.click()
+app.processEvents()
+check("chat" not in gui.current_eq() and chat.name.text() == "Big Bass Movie" and chat.display.values is None,
+      "switching the EQ off stops it but remembers the preset")
+check(w.columns["chat"].eq_btn.text() == "EQ off", "...and the Mixer lane says EQ off")
+chat.toggle.click()
+app.processEvents()
+check(gui.current_eq().get("chat", {}).get("source") == "Big Bass Movie [Game].json", "switching it back on restores it")
+w.choose_preset("chat", "Flat [Chat].json")
+check(pump(lambda: chat.name.text() == "Flat") and "chat" not in gui.current_eq() and not chat.toggle.isEnabled(),
+      "a flat preset means no EQ for the service to run")
+# favourites
+chat.drawer.grid.starred.emit("Big Bass Movie [Game].json")
+app.processEvents()
+check(gui.favourites("chat")[-1] == "Big Bass Movie [Game].json" and "Big Bass Movie [Game].json" in chat.favs.items,
+      "star pins a preset to this channel's favourites")
+check(gui.favourites("game") == gui.DEFAULT_FAVOURITES["game"], "favourites are per channel")
+chat.drawer.grid.starred.emit("Big Bass Movie [Game].json")
+app.processEvents()
+check("Big Bass Movie [Game].json" not in gui.favourites("chat"), "star again unpins it")
+gui.set_favourites("chat", [f"x{i}.json" for i in range(9)])
+w.refresh()
+w.toggle_favourite("chat", "Clear Voices [Chat].json")
+check(len(gui.favourites("chat")) == 9 and "Unpin one" in chat.drawer.note.text(), "only 9 favourites, says so when full")
+gui.set_favourites("chat", ["Clear Voices [Chat].json"])
+w.refresh()
+slot = chat.favs.slot_rects()[0].center().toPoint()
+from PySide6.QtCore import QEvent  # noqa: E402
+from PySide6.QtGui import QMouseEvent  # noqa: E402
+ev = QMouseEvent(QEvent.MouseButtonRelease, QPointF(slot), QPointF(chat.favs.mapToGlobal(slot)), Qt.LeftButton,
+                 Qt.NoButton, Qt.NoModifier)
+chat.favs.mouseReleaseEvent(ev)
+check(pump(lambda: gui.current_eq().get("chat", {}).get("source") == "Clear Voices [Chat].json"),
+      "clicking a favourite uses it")
+# import your own preset
+bad = os.path.join(tmp, "notes.json")
+json.dump({"hello": 1}, open(bad, "w"))
+check(w.import_path("chat", bad) is None and "isn't a Sonar preset" in chat.drawer.note.text(),
+      "importing something that isn't a preset is refused, with a reason")
+mine = os.path.join(tmp, "My Tune.json")
+open(mine, "wb").write(SAMPLE_JSON)
+src = w.import_path("chat", mine)
+check(src == "mine:My Tune.json" and os.path.exists(os.path.join(gui.my_presets_dir(), "My Tune.json")),
+      "importing a Sonar file copies it into My presets")
+check(gui.current_eq().get("chat", {}).get("source") == src and chat.drawer.category == "mine"
+      and [e["title"] for e in chat.drawer.grid.entries] == ["My Tune"], "...uses it and shows it under My presets")
+os.remove(mine)
+check(gui.load_preset(src) and gui.preset_category(src) == "mine", "it keeps working after the original file is gone")
+chat.close_drawer()
+check(pump(lambda: not chat.drawer.isVisible()), "Done slides the drawer away")
+# a game that's playing gets its preset suggested
+game = w.channels["game"]
 w.refresh()
 app.processEvents()
-check(w.columns["chat"].eq_btn.text() == "EQ: Big Bass Movie", f"column shows the EQ: {w.columns['chat'].eq_btn.text()!r}")
-n_before = len(served)
-dlg2 = gui.EqDialog(w, "chat", "#22B59A")
-dlg2.show()
-pump(lambda: dlg2.list.count() == 4)
-dlg2.list.setCurrentItem(next(dlg2.list.item(i) for i in range(dlg2.list.count())
-                              if dlg2.list.item(i).text() == "Big Bass Movie"))
-pump(lambda: bool(dlg2.chosen and dlg2.chosen.get("filters")))
-check(len(served) == n_before, "manifest and preset come from the cache the second time (no downloads)")
-dlg2.list.setCurrentRow(0)
-app.processEvents()
-dlg2.apply()
-check("chat" not in gui.current_eq(), "Off removes the EQ")
+check(game.suggest.isVisibleTo(game) and "THE FINALS" in game.suggest_text.text(),
+      f"Game page suggests the playing game's own preset: {game.suggest_text.text()!r}")
+game.suggest_btn.click()
+check(pump(lambda: gui.current_eq().get("game", {}).get("source") == "The finals [Game].json"), "...one click uses it")
+check(pump(lambda: not game.suggest.isVisibleTo(game)), "...and the suggestion goes away")
+# older versions' EQ settings still show
+data = json.load(open(svc.RULES_PATH))
+data["eq"]["media"] = {"name": "Old File", "source": "file:old.json", "filters": json.loads(json.dumps(saved["filters"]))}
+json.dump(data, open(svc.RULES_PATH, "w"))
+w.refresh()
+check(w.channels["media"].name.text() == "Old File" and w.channels["media"].toggle.isChecked(),
+      "an EQ loaded from a file by an older version still shows and stays on")
+
+
 # --- Media on the dial (state comes from the service's state file)
 def service_state(**kw):
     os.makedirs(os.path.dirname(svc.STATE_PATH), exist_ok=True)
@@ -190,8 +294,11 @@ media = w.columns["media"]
 service_state(media_dial="auto", chat_busy=False, media_on_dial=True)
 check(media.dial_btn.text() == "Dial: Auto" and media.level.text() == "40%" and "Game vs Media" in media.caption.text(),
       f"Auto, nobody in Chat: Media on the dial ({media.caption.text()!r}, {media.level.text()})")
+check(w.mixer.meter.media_follows and w.mixer.meter.chat == 40 and w.mixer.meter.position() > 0,
+      "the dial gauge sits toward Game and says Media follows")
 service_state(media_dial="auto", chat_busy=True, media_on_dial=False, levels={"game": 100, "chat": 40, "media": 100})
-check("Chat's in use" in media.caption.text() and media.bar.blank, "Auto during a call: says Chat's in use, Media off the dial")
+check("Chat's in use" in media.caption.text() and not media.on_dial and not w.mixer.meter.media_follows,
+      "Auto during a call: says Chat's in use, Media off the dial")
 eq_before = gui.current_eq()
 next(a for a in media.dial_btn.menu().actions() if a.data() == "always").trigger()
 app.processEvents()

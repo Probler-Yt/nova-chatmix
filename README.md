@@ -16,7 +16,7 @@ On older Arctis headsets ChatMix was done in hardware. On the Nova Pro, SteelSer
 - **Game, Chat and Media outputs** on the DAC.
 - **Media rides the dial when you're solo.** With nobody in Chat, the dial balances Game against Media, so you can mix a game with a YouTube video without touching another volume slider. The moment a call starts in Chat it's Game vs Chat again, with Media back at full. (You can also put Media on the dial always, or never.)
 - **Drag-and-drop app routing.** Open *ChatMix*, drag Discord into Chat and your browser into Media. They go there automatically every time they make sound from then on, with the window closed. Your apps are grouped the way KDE System Monitor shows them, and Steam games appear under their real names (no Proton or anti-cheat clutter).
-- **Sonar EQ presets, per output.** Give Game, Chat and Media each their own EQ from SteelSeries' Sonar presets: hundreds of game presets (The Finals, Apex, CS2…) plus music, movie and chat ones, or load a preset file exported from SteelSeries GG. Measured through PipeWire, the curves land within a few hundredths of a dB of Sonar's (0.3 dB at worst), and the EQ can't make anything clip.
+- **Sonar EQ presets, per channel, laid out like Sonar.** Chat, Media and Game each get a page with their own EQ, 9 favourite slots and a browser for SteelSeries' Sonar presets: over 300 game presets (The Finals, Apex, CS2…), pro players' presets, music, movie and voice ones, or your own preset files from SteelSeries GG. *Your games* picks out the presets for games you have installed, and every preset shows its curve and what it does ("More bass, scooped mids") before you pick it. Measured through PipeWire, the curves land within a few hundredths of a dB of Sonar's (0.3 dB at worst), and the EQ can't make anything clip.
 - **No GUI needed to run.** A small systemd user service does the work. It survives unplugging the DAC and PipeWire restarts, and hands the dial back to normal volume when it stops.
 - **Lightweight.** The service is a single Python file that needs nothing beyond the standard library and `pactl`. The window uses Qt (PySide6), so it fits right in on KDE.
 
@@ -53,17 +53,23 @@ This installs for your user only. The only part that needs `sudo` is a udev rule
 ## Using it
 
 1. Everything plays through **Game** by default.
-2. Open **ChatMix**. Your open apps are listed under **Apps**. Drag one into **Chat**, **Media** or **Game** to assign it, and drag it back to **Apps** to unassign it. A green dot means the app is making sound right now.
-3. Turn the dial on the GameDAC: one way turns Chat down, the other turns Game down. Press the dial to switch between ChatMix and plain volume.
-4. Media follows the Chat side of the dial while nothing is playing in Chat (**Dial: Auto**, the default). Use the **Dial** button on the Media column to put it on the dial always (**On**) or never (**Off**).
+2. Open **ChatMix**. On the **Mixer** page your open apps are listed under **Apps**. Drag one into **Chat**, **Media** or **Game** to assign it, and drag it back to **Apps** to unassign it. Little level bars next to an app mean it's making sound right now.
+3. Turn the dial on the GameDAC: one way turns Chat down, the other turns Game down. The gauge at the top of the Mixer page shows where it sits. Press the dial to switch between ChatMix and plain volume.
+4. Media follows the Chat side of the dial while nothing is playing in Chat (**Dial: Auto**, the default). Use the **Dial** button in the Media lane to put it on the dial always (**On**) or never (**Off**).
 
 You can also pick the outputs by hand: `Game`, `Chat` and `Media` show up as normal output devices in your sound settings and in apps like Discord.
 
 ### EQ
 
-Click **EQ** under Chat, Media or Game, search for a preset (try your game's name) and click **Apply**. The picker shows the curve before you choose. Presets are downloaded the first time you open it and kept for offline use. **Load file…** takes a Sonar preset `.json`, for example one you exported from SteelSeries GG on Windows.
+Open the **Chat**, **Media** or **Game** tab. The preset in use is at the top with a switch to turn the EQ on and off, your favourites are underneath (click one to use it), then the curve.
 
-<img src="docs/eq.png" alt="Choosing an EQ preset" width="420">
+![The Game page](docs/eq.png)
+
+Click an empty favourite slot, the preset's name or **Browse all presets** to open the browser. It starts on the category that suits the channel (*Your games* for Game, *Voice* for Chat, *Music* for Media), the search box looks through everything, clicking a preset uses it straight away, and the star pins it to that channel's favourites (up to 9). **Import a preset file…** adds a Sonar preset `.json`, for example one you exported from SteelSeries GG on Windows, to *My presets*. When a game with its own Sonar preset is playing, the Game page offers it.
+
+![Browsing presets](docs/presets.png)
+
+Presets are downloaded as you browse them and kept for offline use.
 
 A preset that boosts some frequencies is turned down overall by its biggest boost, so it can never clip. That's why some presets sound a little quieter: turn the volume up a touch.
 
@@ -92,7 +98,7 @@ The Nova Pro's GameDAC doesn't mix anything itself. It reports where the dial is
 4. Watches PipeWire for new audio streams and moves each one to the output its app is assigned to. Apps are identified by the systemd unit they were launched in, which is what KDE System Monitor uses. Steam games are identified by the Steam app ID in their environment, which folds Proton, the Steam runtime and anti-cheat helpers into the game.
 5. For an output with an EQ, runs a PipeWire filter-chain (`pipewire -c`) in place of its loopback: a preamp followed by the preset's filters. Sonar presets are parametric EQs made of standard (RBJ cookbook) peaking, shelf, pass and notch filters; nova-chatmix computes their coefficients itself for every common sample rate and hands them to PipeWire as raw biquads, so the result is the same on every PipeWire version, processed in 32-bit float. The EQ path also skips the loopback's 20 ms buffer, so an EQ'd output reaches your ears sooner. If an EQ can't start, that output keeps playing without it.
 
-Assignments and EQ choices live in `~/.config/nova-chatmix/rules.json`; downloaded presets in `~/.cache/nova-chatmix/sonar/`.
+Assignments, EQ choices and favourites live in `~/.config/nova-chatmix/rules.json`, imported presets in `~/.config/nova-chatmix/presets/`, and downloaded Sonar presets in `~/.cache/nova-chatmix/sonar/`.
 
 ## Troubleshooting
 
@@ -122,7 +128,7 @@ The tests drive the real service and window against a fake DAC (a socket), a fak
 
 Figuring out the GameDAC's protocol was made much easier by the people who reverse-engineered it first: [Linux Arctis Manager](https://github.com/elegos/Linux-Arctis-Manager), [Arctis Sound Manager](https://aur.archlinux.org/packages/arctis-sound-manager), [nova-chatmix-linux](https://github.com/Dymstro/nova-chatmix-linux), [SteelVoiceMix](https://github.com/Ibrahim-Aldhaheri/SteelVoiceMix) and [HeadsetControl](https://github.com/Sapd/HeadsetControl).
 
-The EQ presets are SteelSeries' Sonar presets, as collected and published by [Arctis Sound Manager](https://github.com/loteran/Arctis-Sound-Manager); nova-chatmix downloads them from there when you open the EQ picker rather than shipping them.
+The EQ presets are SteelSeries' Sonar presets, as collected and published by [Arctis Sound Manager](https://github.com/loteran/Arctis-Sound-Manager); nova-chatmix downloads them from there as you browse them rather than shipping them.
 
 Not affiliated with or endorsed by SteelSeries. SteelSeries, Arctis, ChatMix and Sonar are their trademarks.
 
