@@ -94,4 +94,33 @@ if os.geteuid() != 0:
     check(svc.reset_dac() == 1, "no permission: explains how to fix instead of crashing")
 svc.USB_SYSFS = os.path.join(root, "nothing")
 check(svc.reset_dac() == 1, "no DAC plugged in: clear message")
+
+# --- switching ChatMix on: GG's sequence, paced, firmware version read back
+class StubDac:
+    def __init__(self):
+        self.sent, self.replies = [], []
+
+    def send(self, *payload):
+        self.sent.append(payload)
+        if payload == (svc.OP_VERSION,):
+            self.replies.append(bytes([6, 0x10, 0, 0, 0, 0]) + b"02.04.00" + bytes(2))
+
+    def read_reports(self):
+        out, self.replies = self.replies, []
+        return out
+
+
+pauses = []
+dac = StubDac()
+version = svc.arm_chatmix(dac, sleep=pauses.append)
+check(dac.sent == [(0x20,), (0x20,), (0x10,), (0x10,), (0x49, 1), (0x20,)],
+      f"ChatMix switched on with SteelSeries GG's sequence: {dac.sent}")
+check(version == "02.04.00", f"firmware version read from the DAC: {version!r}")
+check(pauses[-2:] == [svc.ARM_SETTLE_S, svc.ARM_SETTLE_S] and svc.ARM_SETTLE_S >= 1.0,
+      "a quiet second either side of the ChatMix switch")
+dac = StubDac()
+dac.replies.append(bytes([7, 0x45, 100, 40]) + bytes(12))  # dial turned while re-arming
+seen = []
+svc.arm_chatmix(dac, sleep=lambda _: None, other=seen.append)
+check([bytes(r[:4]) for r in seen] == [bytes([7, 0x45, 100, 40])], "a dial turn during re-arming isn't lost")
 check.done()

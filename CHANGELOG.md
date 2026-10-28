@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.1
+
+- **Fixes the dial going dead** (pressing it no longer switching to ChatMix, turning it doing nothing) after a replug or a DAC reset. ChatMix is now switched on the way SteelSeries GG does it: the DAC is asked for its status and firmware version first, and the ChatMix switch gets a quiet second either side, without which the DAC can accept it and still ignore the dial. The firmware version is shown in the service log.
+- `scripts/dac-probe.py`: checks how the GameDAC responds, for bug reports.
+
 ## 1.3.0
 
 - **A new window, laid out like Sonar.** Tabs along the top: Mixer, Chat, Media, Game. The Mixer page has the drag-and-drop lanes plus a gauge showing where the dial sits. Each channel page shows its preset, an EQ on/off switch, 9 favourite slots and a large curve.

@@ -114,7 +114,7 @@ check(wait(lambda: d.audio and d.audio.healthy(), 15), "after the DAC blinks, ev
 peer["sock"].settimeout(5)
 got = []
 try:
-    for _ in range(4):
+    for _ in range(8):
         got.append(peer["sock"].recv(64))
 except OSError:
     pass

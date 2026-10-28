@@ -50,9 +50,11 @@ t = threading.Thread(target=d.run, daemon=True)
 t.start()
 while peer["sock"] is None:
     time.sleep(0.05)
-cmds = recv(2)
+cmds = recv(6)
 check(cmds[0][:2] == bytes([6, 0x20]) and len(cmds[0]) == 16, "status request sent as a 16-byte report")
-check(cmds[1][:3] == bytes([6, 0x49, 1]), "ChatMix enabled on the dial")
+check([c[:3] for c in cmds] == [bytes([6, 0x20, 0]), bytes([6, 0x20, 0]), bytes([6, 0x10, 0]), bytes([6, 0x10, 0]),
+                                bytes([6, 0x49, 1]), bytes([6, 0x20, 0])],
+      "ChatMix switched on the way SteelSeries GG does it: status x2, version x2, ChatMix on, status")
 st = state()
 sinks = sorted(m["args"][0] for m in st["modules"].values() if m["name"] == "module-null-sink")
 check(sinks == ["sink_name=ChatMix_Chat", "sink_name=ChatMix_Game", "sink_name=ChatMix_Media"],
@@ -89,7 +91,7 @@ wait_for(lambda: len(state()["modules"]) == 6 and not state().get("links_down") 
          vols()["ChatMix_Game"] == "40%", 20)
 check(len(state()["modules"]) == 6 and not state().get("links_down"), "dropped links to the DAC noticed and reconnected")
 check(vols()["ChatMix_Game"] == "40%", "dial position kept across the reconnect")
-check(recv(2)[1][:3] == bytes([6, 0x49, 1]), "ChatMix switched back on after the DAC reset")
+check(bytes([6, 0x49, 1]) in [c[:3] for c in recv(6)], "ChatMix switched back on after the DAC reset")
 
 setstate(dac_present=False)  # unplug
 os.remove(DEV)
@@ -102,9 +104,9 @@ peer["sock"] = None
 open(DEV, "w").close()
 while peer["sock"] is None:
     time.sleep(0.05)
-got = recv(2)[1][:3]
+got = [c[:3] for c in recv(6)]
 wait_for(lambda: len(state()["modules"]) == 6)
-check(got == bytes([6, 0x49, 1]) and len(state()["modules"]) == 6, "back after replug")
+check(bytes([6, 0x49, 1]) in got and len(state()["modules"]) == 6, "back after replug")
 
 d.stop()
 t.join(5)

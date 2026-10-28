@@ -20,7 +20,11 @@ Protocol (GameDAC Gen 2, USB 1038:12cb / 12cd / 12fa, HID interface 4):
   host -> DAC   : 16-byte output report, report id 0x06, sent as SET_REPORT
                   [0x06, 0x49, 0x01]  enable ChatMix   (0x00 = disable)
                   [0x06, 0x20]        status request
+                  [0x06, 0x10]        firmware version request
   DAC  -> host  : [0x07, 0x45, game, chat]  dial position, each 0..100
+                  [0x06, 0x10, 0,0,0,0, "02.04.00"]  version reply
+ChatMix is switched on as SteelSeries GG does it (arm_chatmix): status x2,
+version x2, then 0x49 0x01 with a quiet second either side.
 Commands need >= 50 ms between them, and the DAC wants ~5 s after it
 enumerates before it is sent anything. Only opcodes the DAC defines are
 used: unknown ones get a USB STALL and can wedge it until a replug.
@@ -28,7 +32,7 @@ used: unknown ones get a USB STALL and can wedge it until a replug.
 Only needs Python 3 (stdlib) and pactl (pipewire-pulse).
 """
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 import argparse
 import errno
@@ -60,7 +64,14 @@ REPORT_LEN = 16
 TX = 0x06
 RX = 0x07
 OP_STATUS = 0x20
+OP_VERSION = 0x10        # answers with the firmware version, e.g. "02.04.00"
 OP_CHATMIX_ENABLE = 0x49
+# Switching ChatMix on, the way SteelSeries GG does it: status twice, version
+# twice, then the switch with a quiet second either side. Sent any closer, or
+# without the version requests, the DAC can take the command and still leave
+# the dial dead (no ChatMix, not even volume reports) until it's re-armed.
+ARM_STEP_S = 0.3
+ARM_SETTLE_S = 1.0
 OP_CHATMIX = 0x45
 COMMAND_GAP_S = 0.05
 DAC_BOOT_WAIT_S = 5.0
@@ -226,6 +237,30 @@ class Dac:
             os.close(self.fd)
         except OSError:
             pass
+
+
+def arm_chatmix(dac, sleep=time.sleep, running=lambda: True, other=lambda report: None):
+    """Switch the dial to ChatMix. Returns the firmware version if the DAC said it.
+
+    Anything else the DAC sends meanwhile (a dial turned while re-arming) goes
+    to other(report) rather than being lost."""
+    version = None
+    for op in (OP_STATUS, OP_STATUS, OP_VERSION, OP_VERSION):
+        if not running():
+            return version
+        dac.send(op)
+        sleep(ARM_STEP_S)
+        for r in dac.read_reports():
+            if len(r) >= 14 and r[0] == TX and r[1] == OP_VERSION:
+                text = bytes(r[6:16]).split(b"\0")[0].decode("ascii", "replace").strip()
+                version = text or version
+            else:
+                other(r)
+    sleep(ARM_SETTLE_S)
+    dac.send(OP_CHATMIX_ENABLE, 0x01)
+    sleep(ARM_SETTLE_S)  # leave the switch alone or the DAC may drop it
+    dac.send(OP_STATUS)
+    return version
 
 
 def parse_chatmix(report):
@@ -1228,8 +1263,14 @@ class Daemon:
                     self.rules.start()
 
     def arm_dac(self):
-        self.dac.send(OP_STATUS)
-        self.dac.send(OP_CHATMIX_ENABLE, 0x01)
+        def other(report):
+            mix = parse_chatmix(report)
+            if mix and self.audio:
+                self.audio.set_mix(*mix)
+        version = arm_chatmix(self.dac, self.sleep, lambda: self.running, other)
+        if version and version != getattr(self, "fw_version", None):
+            self.fw_version = version
+            log.info("GameDAC firmware %s", version)
 
     def sleep(self, seconds):
         end = time.monotonic() + seconds
@@ -1290,8 +1331,8 @@ def listen(args):
         sys.exit("No Nova Pro Wired GameDAC (interface 4) found.")
     print(f"{path}  (product {pid:04x}) - turn the dial, Ctrl+C to stop")
     dac = Dac(path)
-    dac.send(OP_STATUS)
-    dac.send(OP_CHATMIX_ENABLE, 0x01)
+    version = arm_chatmix(dac)
+    print(f"ChatMix switched on (firmware {version or 'unknown'})", flush=True)
     try:
         while True:
             select.select([dac.fd], [], [], 1.0)
