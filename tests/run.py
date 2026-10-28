@@ -25,9 +25,15 @@ for broken in (False, True):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
         if broken:
             env["FAKE_BROKEN_JSON"] = "1"
-        r = subprocess.run([sys.executable, os.path.join(HERE, suite)], cwd=HERE, env=env, timeout=600)
+        r = subprocess.run([sys.executable, os.path.join(HERE, suite)], cwd=HERE, env=env, timeout=600,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        print(r.stdout, end="", flush=True)
         if r.returncode:
             failed.append(label)
+            if os.environ.get("GITHUB_ACTIONS"):  # readable from the Actions page and its API
+                lines = [l for l in r.stdout.splitlines() if l.startswith("FAIL ")] or r.stdout.splitlines()[-25:]
+                body = "%0A".join(l.replace("%", "%25").replace("\r", "") for l in lines)
+                print(f"::error title={label} failed::{body}", flush=True)
 
 print("\n" + ("All tests passed." if not failed else "FAILED: " + ", ".join(failed)))
 sys.exit(1 if failed else 0)
