@@ -49,6 +49,7 @@ gh repo edit "$REPO" --description "$DESC" \
   --add-topic chatmix --add-topic pipewire --add-topic kde --add-topic aur >/dev/null || true
 
 say "Release $TAG"
+git fetch -q --tags origin || true  # CI makes the release itself when the version goes up
 if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   git tag -a "$TAG" -m "$NAME $VER"
 fi

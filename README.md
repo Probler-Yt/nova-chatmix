@@ -58,6 +58,8 @@ This installs for your user only. The only part that needs `sudo` is a udev rule
 4. Media follows the Chat side of the dial while nothing is playing in Chat (**Dial: Auto**, the default). Use the **Dial** button in the Media lane to put it on the dial always (**On**) or never (**Off**).
 5. Switching to speakers? Just pick them as your output as usual (sound settings, a hotkey, a macro pad). ChatMix lets go of every app while you're on them, and puts each one back in Chat, Media or Game when you pick the headset again.
 
+**Updating:** when there's a new version, an **Update to x.y** button appears at the top of the window. Click it and enter your password when asked; ChatMix installs the update and reopens. (⋯ > *Check for updates* checks right away. AUR users can also just `yay -Syu`.)
+
 You can also pick the outputs by hand: `Game`, `Chat` and `Media` show up as normal output devices in your sound settings and in apps like Discord.
 
 ### EQ

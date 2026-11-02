@@ -19,6 +19,10 @@ ChatMix window - drag apps between Apps, Chat, Media and Game for nova-chatmix.
 
 import glob
 import importlib.machinery
+import shutil
+import subprocess
+import tarfile
+import tempfile
 import importlib.util
 import json
 import os
@@ -744,6 +748,141 @@ def load_preset(source):
     return sonar_preset(source)
 
 
+# ------------------------------------------------------------- updates ---
+# New versions are published as GitHub releases (CI makes one whenever the
+# version goes up and the tests pass). The window checks for one now and then,
+# and its Update button installs it the way it was installed before: rebuilt as
+# a pacman package, or copied over the files in ~/.local/bin.
+
+REPO = "Probler-Yt/nova-chatmix"
+RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"
+RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
+UPDATE_CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
+                            "nova-chatmix", "update.json")
+UPDATE_CHECK_EVERY_S = 12 * 3600
+
+
+class UpdateError(Exception):
+    pass
+
+
+def version_tuple(v):
+    nums = [int(n) for n in re.findall(r"\d+", str(v))[:3]]
+    return tuple(nums + [0] * (3 - len(nums)))
+
+
+def latest_release(force=False):
+    """{"version", "url", "notes"} for the newest release, or None. Cached for 12 hours."""
+    try:
+        fresh = not force and time.time() - os.stat(UPDATE_CACHE).st_mtime < UPDATE_CHECK_EVERY_S
+    except OSError:
+        fresh = False
+    if fresh:
+        try:
+            with open(UPDATE_CACHE) as f:
+                return json.load(f) or None
+        except (OSError, ValueError):
+            pass
+    data = json.loads(_http_get(RELEASES_API))
+    ver = str(data.get("tag_name", "")).lstrip("v")
+    want = f"nova-chatmix-{ver}.tar.gz"
+    asset = next((a for a in data.get("assets") or [] if a.get("name") == want), None)
+    url = (asset or {}).get("browser_download_url", "")
+    info = None
+    if ver and url.startswith(f"https://github.com/{REPO}/releases/download/"):
+        info = {"version": ver, "url": url, "notes": str(data.get("body") or "")}
+    os.makedirs(os.path.dirname(UPDATE_CACHE), exist_ok=True)
+    with open(UPDATE_CACHE + ".tmp", "w") as f:
+        json.dump(info, f)
+    os.replace(UPDATE_CACHE + ".tmp", UPDATE_CACHE)
+    return info
+
+
+def is_newer(info):
+    return bool(info) and version_tuple(info["version"]) > version_tuple(svc.__version__)
+
+
+def install_kind(path=None):
+    """How this copy was installed: "package" (pacman), "user" (~/.local, by
+    install.sh), "system" (make install by hand) or "source" (a git checkout)."""
+    path = os.path.realpath(path or __file__)
+    if path.startswith("/usr/"):
+        if shutil.which("pacman") and subprocess.run(["pacman", "-Qqo", path], capture_output=True).returncode == 0:
+            return "package"
+        return "system"
+    if path.startswith(os.path.realpath(os.path.expanduser("~/.local")) + os.sep):
+        return "user"
+    return "source"
+
+
+def _tail(text, n=6):
+    return "\n".join((text or "").strip().splitlines()[-n:])
+
+
+def run_update(info, progress=lambda message: None, kind=None, user_bin=None):
+    """Download a release and install it the same way this copy was installed."""
+    kind = kind or install_kind()
+    if kind not in ("package", "user"):
+        raise UpdateError("this copy wasn't installed from a package or install.sh, so update it the way "
+                          "you installed it")
+    work = tempfile.mkdtemp(prefix="nova-chatmix-update-")
+    try:
+        ver = info["version"]
+        name = f"nova-chatmix-{ver}.tar.gz"
+        progress(f"Downloading {ver}…")
+        tarball = os.path.join(work, name)
+        with open(tarball, "wb") as f:
+            f.write(_http_get(info["url"], timeout=60))
+        unpacked = os.path.join(work, "unpacked")
+        with tarfile.open(tarball) as t:
+            try:
+                t.extractall(unpacked, filter="data")
+            except TypeError:  # Python without extraction filters
+                t.extractall(unpacked)
+        top = os.path.join(unpacked, f"nova-chatmix-{ver}")
+        got = re.search(r'__version__ = "([^"]+)"', svc._read(os.path.join(top, "src", "nova-chatmix.py")) or "")
+        if not got or got.group(1) != ver:
+            raise UpdateError(f"the download for {ver} doesn't contain version {ver}")
+        if kind == "user":
+            progress("Installing…")
+            bindir = user_bin or os.path.dirname(os.path.realpath(__file__))
+            for src, dst in (("nova-chatmix.py", "nova-chatmix"), ("nova-chatmix-gui.py", "nova-chatmix-gui")):
+                tmp = os.path.join(bindir, f".{dst}.new")
+                shutil.copyfile(os.path.join(top, "src", src), tmp)
+                os.chmod(tmp, 0o755)
+                os.replace(tmp, os.path.join(bindir, dst))
+        else:
+            progress("Building the package…")
+            build = os.path.join(work, "build")
+            os.makedirs(build)
+            pkgbuild = open(os.path.join(top, "packaging", "aur", "PKGBUILD")).read()
+            pkgbuild = re.sub(r"(?m)^pkgver=.*$", f"pkgver={ver}", pkgbuild)
+            with open(os.path.join(build, "PKGBUILD"), "w") as f:
+                f.write(pkgbuild)
+            shutil.copy(os.path.join(top, "packaging", "aur", "nova-chatmix.install"), build)
+            shutil.copy(tarball, build)  # so makepkg doesn't download it again
+            r = subprocess.run(["makepkg", "-f", "--noconfirm", "--skipchecksums"], cwd=build,
+                               capture_output=True, text=True)
+            if r.returncode:
+                hint = " (is base-devel installed?)" if "fakeroot" in (r.stderr + r.stdout) else ""
+                raise UpdateError(f"building the package failed{hint}:\n{_tail(r.stderr or r.stdout)}")
+            pkgs = [p for p in glob.glob(os.path.join(build, "*.pkg.tar.*")) if "-debug-" not in p]
+            if not pkgs:
+                raise UpdateError("makepkg didn't produce a package")
+            progress("Installing: enter your password…")
+            r = subprocess.run(["pkexec", "pacman", "-U", "--noconfirm", pkgs[0]], capture_output=True, text=True)
+            if r.returncode in (126, 127):
+                raise UpdateError("cancelled: the password prompt was closed" if r.returncode == 126 else
+                                  "pkexec isn't available, so the package can't be installed from here")
+            if r.returncode:
+                raise UpdateError(f"pacman couldn't install it:\n{_tail(r.stderr or r.stdout)}")
+        progress("Restarting…")
+        subprocess.run(["systemctl", "--user", "try-restart", "nova-chatmix.service"], capture_output=True)
+        return ver
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def debug_dump():
     index = DesktopIndex()
     apps = scan_apps(index)
@@ -781,9 +920,9 @@ if "--debug" in sys.argv:
     sys.exit(0)
 
 from PySide6.QtCore import (QEasingCurve, QMimeData, QObject, QPoint, QPointF, QProcess,  # noqa: E402
-                            QProcessEnvironment, QPropertyAnimation, QRectF, QSize, Qt, QTimer,
+                            QProcessEnvironment, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl,
                             QVariantAnimation, Signal)
-from PySide6.QtGui import (QAction, QColor, QDrag, QFont, QFontMetrics, QIcon,  # noqa: E402
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QDrag, QFont, QFontMetrics, QIcon,  # noqa: E402
                            QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap)
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QFileDialog, QFrame, QHBoxLayout,  # noqa: E402
                                QLabel, QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy,
@@ -831,6 +970,10 @@ def stylesheet():
         padding: 0 8px 4px 8px; border-radius: 8px; }}
     QToolButton#more:hover {{ background: {T['raise']}; color: {T['text']}; }}
     QToolButton#more::menu-indicator {{ image: none; width: 0; }}
+    QPushButton#update {{ background: {ACCENT['chat']}; color: {T['deep']}; border: none; border-radius: 13px;
+        padding: 4px 14px; font-weight: 700; }}
+    QPushButton#update:hover {{ background: {QColor(ACCENT['chat']).lighter(115).name()}; }}
+    QPushButton#update:disabled {{ background: {T['raise']}; color: {T['muted']}; }}
     #caption, #detail {{ color: {T['muted']}; }}
     #caption {{ font-size: 8.5pt; }}
     #hint {{ color: {T['faint']}; font-size: 8.5pt; }}
@@ -948,6 +1091,30 @@ def app_pixmap(card, size=28):
 
 
 # ---------------------------------------------------------- presets ---
+
+class Background(QObject):
+    """Run fn() on a thread; done(result, error message) arrives on the UI thread.
+    progress(text) can be called from fn's thread too."""
+    done = Signal(object, str)
+    progress = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def run(self, fn):
+        import threading
+
+        def job():
+            try:
+                result, err = fn(), ""
+            except Exception as e:  # network, build, install...
+                result, err = None, str(e) or e.__class__.__name__
+            try:
+                self.done.emit(result, err)
+            except RuntimeError:  # the window closed meanwhile
+                pass
+        threading.Thread(target=job, daemon=True).start()
+
 
 class PresetStore(QObject):
     """Downloads presets in the background and remembers their curves."""
@@ -2185,6 +2352,14 @@ class Window(QWidget):
             self.tabs[key] = b
             bar.addWidget(b)
         bar.addStretch(1)
+        self.update_btn = QPushButton("")
+        self.update_btn.setObjectName("update")
+        self.update_btn.setCursor(Qt.PointingHandCursor)
+        self.update_btn.clicked.connect(self.start_update)
+        self.update_btn.hide()
+        bar.addWidget(self.update_btn)
+        bar.addSpacing(8)
+        self.update_info, self.update_error, self.updating = None, "", False
         self.more = QToolButton()
         self.more.setObjectName("more")
         self.more.setText("⋯")
@@ -2197,6 +2372,13 @@ class Window(QWidget):
         refresh_presets.triggered.connect(lambda: self.store.load_manifest(refresh=True))
         menu.addAction(self.reset_action)
         menu.addAction(refresh_presets)
+        menu.addSeparator()
+        self.check_action = QAction("Check for updates", menu)
+        self.check_action.triggered.connect(lambda: self.check_updates(force=True))
+        menu.addAction(self.check_action)
+        about = QAction(f"ChatMix {svc.__version__}", menu)
+        about.setEnabled(False)
+        menu.addAction(about)
         self.more.setMenu(menu)
         bar.addWidget(self.more)
         root.addLayout(bar)
@@ -2248,6 +2430,77 @@ class Window(QWidget):
         self.poll.start()
         self.store.load_manifest()
         self.refresh()
+        QTimer.singleShot(3000, self.check_updates)
+        self.update_timer = QTimer(self)
+        self.update_timer.setInterval(3600 * 1000)  # the check itself is cached for 12 hours
+        self.update_timer.timeout.connect(self.check_updates)
+        self.update_timer.start()
+
+    # ---- updates
+    def check_updates(self, force=False):
+        if self.updating:
+            return
+        task = Background(self)
+
+        def done(info, err):
+            task.deleteLater()
+            if err:
+                if force:
+                    self._flash(f"Couldn't check for updates: {err}")
+                return
+            self.update_info = info
+            if is_newer(info):
+                self.update_btn.setText(f"Update to {info['version']}")
+                notes = "\n".join(info["notes"].strip().splitlines()[:14])
+                self.update_btn.setToolTip(f"ChatMix {info['version']} is out (you have {svc.__version__}).\n\n"
+                                           f"{notes}")
+                self.update_btn.setEnabled(True)
+                self.update_btn.show()
+            elif force:
+                self._flash(f"You're up to date ({svc.__version__})")
+        task.done.connect(done)
+        task.run(lambda: latest_release(force))
+
+    def _flash(self, text):
+        self.update_btn.setText(text)
+        self.update_btn.setToolTip("")
+        self.update_btn.setEnabled(False)
+        self.update_btn.show()
+        QTimer.singleShot(5000, lambda: None if is_newer(self.update_info) or self.updating
+                          else self.update_btn.hide())
+
+    def start_update(self):
+        info = self.update_info
+        if not is_newer(info) or self.updating:
+            return
+        kind = install_kind()
+        if kind not in ("package", "user"):  # installed some other way: show where to get it
+            QDesktopServices.openUrl(QUrl(RELEASES_PAGE))
+            return
+        self.updating, self.update_error = True, ""
+        self.update_btn.setEnabled(False)
+        task = Background(self)
+        task.progress.connect(self.update_btn.setText)
+
+        def done(ver, err):
+            task.deleteLater()
+            self.updating = False
+            if err:
+                self.update_error = err
+                self.update_btn.setText("Update failed, try again")
+                self.update_btn.setToolTip(err)
+                self.update_btn.setEnabled(True)
+                self.refresh()
+                return
+            self.update_btn.setText(f"Updated to {ver}, reopening…")
+            QTimer.singleShot(800, self.relaunch)
+        task.done.connect(done)
+        task.run(lambda: run_update(info, task.progress.emit, kind))
+
+    def relaunch(self):
+        QProcess.startDetached(sys.executable, [os.path.realpath(__file__)])
+        self.close()
+        QApplication.quit()
 
     def _start_watch(self):
         if self.watch.state() == QProcess.NotRunning:
@@ -2438,7 +2691,11 @@ class Window(QWidget):
             if self.manifest_names is not None:
                 self._rebuild_catalogue()
 
-        if snap["errors"]:
+        if self.update_error:
+            self.banner.setVisible(True)
+            self.banner_btn.setVisible(False)
+            self.banner_text.setText(f"The update didn't work: {self.update_error}")
+        elif snap["errors"]:
             self.banner.setVisible(True)
             self.banner_btn.setVisible(False)
             self.banner_text.setText("Couldn't read your audio setup: " + "; ".join(snap["errors"]))

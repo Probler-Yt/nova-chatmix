@@ -36,3 +36,33 @@ jobs:
           QT_QPA_PLATFORM: offscreen
       - name: Package layout
         run: make install DESTDIR="$PWD/pkgroot" PREFIX=/usr && find pkgroot -type f | sort
+
+  # When the version in src/nova-chatmix.py goes up and the tests pass, publish
+  # it as a GitHub release (tag + tarball). The window's Update button and the
+  # AUR package both install from these releases.
+  release:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Release the new version, if there is one
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER=$(make -s version)
+          TAG="v$VER"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG is already released"; exit 0
+          fi
+          mkdir -p dist
+          git archive --format=tar.gz --prefix="nova-chatmix-$VER/" -o "dist/nova-chatmix-$VER.tar.gz" HEAD
+          awk -v v="$VER" '/^## /{p=($2==v); next} p' CHANGELOG.md > dist/notes.md
+          printf '\n**Update:** click *Update* in the ChatMix window, or `yay -S nova-chatmix`. Other distros: see the README.\n' >> dist/notes.md
+          gh release create "$TAG" "dist/nova-chatmix-$VER.tar.gz" --target "$GITHUB_SHA" \
+            --title "nova-chatmix $VER" --notes-file dist/notes.md

@@ -32,7 +32,7 @@ used: unknown ones get a USB STALL and can wedge it until a replug.
 Only needs Python 3 (stdlib) and pactl (pipewire-pulse).
 """
 
-__version__ = "1.3.2"
+__version__ = "1.4.0"
 
 import argparse
 import errno

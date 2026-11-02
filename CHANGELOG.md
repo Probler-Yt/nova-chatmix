@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.0
+
+- **Update button.** The window checks GitHub for a new version (twice a day, or from ⋯ > Check for updates) and shows an *Update to x.y* button. One click downloads the release and installs it the way ChatMix was installed: rebuilt as a pacman package (you're asked for your password once) or copied into `~/.local/bin` for an install.sh copy. Then it restarts the service and reopens the window.
+- New versions are released automatically when their tests pass, so the button sees them straight away. `scripts/publish.sh` is now only needed for the AUR.
+- The ⋯ menu shows which version you're running.
+
 ## 1.3.2
 
 - **Switching to your speakers works properly.** Pick any other output in your system's sound settings (or with a macro pad, `pactl set-default-sink`...) and ChatMix lets go: every app it was holding in Game, Chat or Media, YouTube in Media included, moves to that output, and anything that starts meanwhile goes there too. Pick the GameDAC again and they all go back to their channels, with Game as the default. If you're already on speakers when ChatMix starts, it leaves them alone. The window shows a note while you're on another output.

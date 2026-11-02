@@ -9,16 +9,18 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SUITES = ["test_parsing.py", "test_eq.py", "test_dial.py", "test_routing.py", "test_window.py",
-          "test_real_pipewire.py"]
+          "test_update.py", "test_real_pipewire.py"]
 if "--no-gui" in sys.argv:
     SUITES.remove("test_window.py")
+    SUITES.remove("test_update.py")
 if "--no-pipewire" in sys.argv:
     SUITES.remove("test_real_pipewire.py")
 
 failed = []
 for broken in (False, True):
     for suite in SUITES:
-        if broken and suite in ("test_parsing.py", "test_eq.py", "test_dial.py", "test_real_pipewire.py"):
+        if broken and suite in ("test_parsing.py", "test_eq.py", "test_dial.py", "test_update.py",
+                                "test_real_pipewire.py"):
             continue  # nothing there reads full fake pactl listings
         label = suite + (" [broken pactl JSON]" if broken else "")
         print(f"\n=== {label}")
