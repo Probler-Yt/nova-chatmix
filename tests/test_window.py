@@ -333,5 +333,28 @@ check(svc.load_rules().get(card["key"]) == "chat" and before == after,
       "assigning on speakers saves the rule but leaves the sound where it is")
 service_state(media_dial="auto")
 check(not w.banner.isVisibleTo(w), "back on the headset: banner gone")
+
+# --- looks: Liquid Glass by default, Classic from the ⋯ menu, remembered
+check(gui.LOOK == "glass" and not w.autoFillBackground() and w.sepline.isHidden(),
+      "opens in Liquid Glass when nothing's been chosen")
+check([a.text() for a in w.look_actions.values()] == ["Liquid Glass", "Classic (lightest)"]
+      and w.look_actions["glass"].isChecked(), "the Look menu offers both, with Liquid Glass ticked")
+img = w.grab().toImage()
+check(not img.isNull() and w.glass.frost is not None and w.glass.rims, "glass: backdrop, frost and bent rims drawn")
+corner = img.pixelColor(4, img.height() - 4)
+check(corner != QColor(gui.T["ink"]), "glass: the backdrop shows, not the flat window colour")
+w.look_actions["classic"].trigger()
+app.processEvents()
+check(gui.LOOK == "classic" and w.autoFillBackground() and not w.sepline.isHidden()
+      and not w.mixer.seps[0].isHidden(), "Classic: flat window and the hairlines are back")
+check(json.load(open(svc.RULES_PATH)).get("look") == "classic", "the choice is saved in the settings")
+check(svc.load_rules().get(card["key"]) == "chat", "...without touching the app rules")
+img = w.grab().toImage()
+check(img.pixelColor(4, img.height() - 4) == QColor(gui.T["ink"]), "Classic: the plain dark window")
+check(gui.look_setting() == "classic", "and it's what the next window will open with")
+w.set_look("glass")
+app.processEvents()
+check(gui.LOOK == "glass" and not w.autoFillBackground() and w.mixer.seps[0].isHidden(),
+      "and back to Liquid Glass")
 w.close()
 check.done()

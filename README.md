@@ -58,6 +58,8 @@ This installs for your user only. The only part that needs `sudo` is a udev rule
 4. Media follows the Chat side of the dial while nothing is playing in Chat (**Dial: Auto**, the default). Use the **Dial** button in the Media lane to put it on the dial always (**On**) or never (**Off**).
 5. Switching to speakers? Use the output button at the top of the window, where *Set a shortcut…* gives it a global key (a macro pad key works too) and *Show in this list* hides outputs you never use. On other desktops, put `nova-chatmix --output toggle` on a shortcut. Picking them from your sound settings works too. ChatMix lets go of every app while you're on the speakers, and puts each one back in Chat, Media or Game when you switch to the headset again.
 
+**Look:** ChatMix opens in **Liquid Glass**: frosted glass panels over a backdrop in the Chat, Media and Game colours, with edges that bend what's behind them. It's painted once and reused rather than blurred live, so it stays light. Prefer the original flat dark look? ⋯ > *Look* > **Classic (lightest)**. Your choice is remembered.
+
 **Updating:** when there's a new version, an **Update to x.y** button appears at the top of the window. Click it and enter your password when asked; ChatMix installs the update and reopens. (⋯ > *Check for updates* checks right away. AUR users can also just `yay -Syu`.)
 
 You can also pick the outputs by hand: `Game`, `Chat` and `Media` show up as normal output devices in your sound settings and in apps like Discord.

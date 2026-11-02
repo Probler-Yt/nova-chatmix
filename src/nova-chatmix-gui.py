@@ -999,8 +999,9 @@ if "--debug" in sys.argv:
 from PySide6.QtCore import (QEasingCurve, QMimeData, QObject, QPoint, QPointF, QProcess,  # noqa: E402
                             QProcessEnvironment, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl,
                             QVariantAnimation, Signal)
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QDrag, QFont, QFontMetrics, QIcon,  # noqa: E402
-                           QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap)
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices, QDrag, QFont, QFontMetrics, QIcon,  # noqa: E402
+                           QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap,
+                           QRadialGradient)
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QDialog, QFileDialog, QFrame, QHBoxLayout,  # noqa: E402
                                QKeySequenceEdit, QLabel, QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy,
                                QStackedWidget, QToolButton, QVBoxLayout, QWidget)
@@ -1098,6 +1099,308 @@ def stylesheet():
     QScrollBar::handle:vertical:hover {{ background: {T['faint']}; }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
     QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
+    """ + (glass_stylesheet() if is_glass() else "")
+
+
+# ------------------------------------------------------------- looks ---
+# Two looks, picked from the ⋯ menu and remembered:
+#   glass    (the default) frosted glass panels over a backdrop in the three
+#            channel colours, with edges that bend what's behind them.
+#   classic  the original flat dark look, the lightest to draw.
+#
+# The glass is cheap to draw because nothing is blurred live. The backdrop and
+# a frosted copy of it are painted once per window size; each panel shows its
+# own slice of the frost, and the bent rim of each panel is worked out once for
+# its size and place, then reused on every repaint.
+
+LOOKS = {"glass": "Liquid Glass", "classic": "Classic (lightest)"}
+LOOK = "glass"   # the window sets this from the settings when it opens
+
+
+def look_setting():
+    look = _read_settings().get("look", "glass")
+    return look if look in LOOKS else "glass"
+
+
+def save_look(look):
+    data = _read_settings()
+    data["look"] = look
+    _write_settings(data)
+
+
+def is_glass():
+    return LOOK == "glass"
+
+
+def paint_backdrop(p, w, h):
+    """Soft ribbons in the channel colours over near-black: what the glass sits on."""
+    import math
+    p.fillRect(QRectF(0, 0, w, h), QColor("#090B12"))
+    for cx, cy, colour, a in ((.08, .05, ACCENT["chat"], 70), (.98, .30, ACCENT["media"], 75),
+                              (.30, 1.05, ACCENT["game"], 55)):
+        g = QRadialGradient(QPointF(w * cx, h * cy), max(w, h) * .62)
+        g.setColorAt(0, qc(colour, a))
+        g.setColorAt(1, qc(colour, 0))
+        p.fillRect(QRectF(0, 0, w, h), g)
+    ribbons = [  # base height, swell, waves, phase, colours top -> bottom, opacity
+        (.56, .07, 1.3, .5, ("#3FE0C0", "#1B8F8A", "#0D3B4A"), .55),
+        (.66, .06, 1.7, 2.2, ("#C38BFF", "#6A3BB8", "#251450"), .60),
+        (.78, .05, 1.1, 4.1, ("#FFB547", "#B5552B", "#3A160F"), .55),
+        (.90, .04, 1.9, 1.3, ("#2A3A6E", "#151B38", "#0A0C18"), .90),
+    ]
+    p.setPen(Qt.NoPen)
+    for base, amp, freq, phase, cols, op in ribbons:
+        path = QPainterPath()
+        path.moveTo(0, h)
+        for i in range(65):
+            t = i / 64
+            y = h * base + math.sin(t * math.pi * freq + phase) * h * amp \
+                + math.sin(t * math.pi * freq * 2.3 + phase * 1.7) * h * amp * .35
+            path.lineTo(w * t, y)
+        path.lineTo(w, h)
+        path.closeSubpath()
+        g = QLinearGradient(0, h * (base - .12), w * .3, h)
+        for at, c in zip((0, .45, 1), cols):
+            g.setColorAt(at, QColor(c))
+        p.setOpacity(op)
+        p.fillPath(path, g)
+        p.setOpacity(1)
+        lit = QLinearGradient(0, h * (base - amp), 0, h * (base + amp * .25))
+        lit.setColorAt(0, QColor(255, 255, 255, 40))
+        lit.setColorAt(1, QColor(255, 255, 255, 0))
+        p.fillPath(path, lit)
+
+
+class Glass:
+    """The backdrop, its frosted copy and the cached panel rims, for one window."""
+    S = 4      # the frost is kept at a quarter size: it's blurred, nobody can tell
+    K = 3      # rims are worked out at one point per 3 px, then smoothed when drawn
+
+    def __init__(self, win):
+        self.win = win
+        self.size = QSize()
+        self.backdrop = self.frost = self.bits = None
+        self.maps, self.rims = {}, {}
+        self.settled = True          # False while the window is being resized
+        self.settle = QTimer(win)
+        self.settle.setSingleShot(True)
+        self.settle.setInterval(160)
+        self.settle.timeout.connect(self._settled)
+
+    def resized(self):
+        self.settled = False
+        self.settle.start()
+
+    def _settled(self):
+        self.settled = True
+        self.win.update()
+
+    def ensure(self):
+        s = self.win.size()
+        if self.backdrop is not None and (s == self.size or not self.settled):
+            return
+        self.size = QSize(s)
+        w, h = max(1, s.width()), max(1, s.height())
+        dpr = self.win.devicePixelRatioF() or 1.0
+        pm = QPixmap(int(w * dpr), int(h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        paint_backdrop(p, w, h)
+        p.end()
+        self.backdrop = pm
+        # frost: shrink hard, grow back to a quarter size (a blur, done by Qt in C++),
+        # then the glass's own lift in brightness and colour
+        img = pm.toImage().scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        tiny = img.scaled(max(1, w // 24), max(1, h // 24), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        frost = tiny.scaled(max(2, w // self.S), max(2, h // self.S), Qt.IgnoreAspectRatio,
+                            Qt.SmoothTransformation).convertToFormat(QImage.Format_RGB32)
+        p = QPainter(frost)
+        p.setCompositionMode(QPainter.CompositionMode_Screen)
+        p.fillRect(frost.rect(), QColor(255, 255, 255, 14))
+        p.end()
+        self.frost = frost
+        self.bits = bytes(frost.constBits())[: frost.bytesPerLine() * frost.height()]
+        self.rims.clear()
+
+    # ---- the bent rim
+    def _map(self, w, h, r):
+        """For a rounded box: the points in its edge band and how far each one's view is pulled in."""
+        key = (w, h, r)
+        if key in self.maps:
+            return self.maps[key]
+        import math
+        K = self.K
+        cw, ch = max(1, math.ceil(w / K)), max(1, math.ceil(h / K))
+        band = min(h / 3, 8 + r * .3)
+        scale = band * 1.2 * .5
+        pts = []
+        for j in range(ch):
+            yy = (j + .5) * K
+            for i in range(cw):
+                xx = (i + .5) * K
+                px, py = min(xx, w - xx), min(yy, h - yy)
+                if px > band and py > band and (px > r or py > r):
+                    continue
+                ox, oy = max(r - px, 0), max(r - py, 0)
+                vx = vy = 0.0
+                if ox > 0 and oy > 0:
+                    ln = math.hypot(ox, oy) or 1
+                    dist = r - ln
+                    vx = (1 if xx < w / 2 else -1) * ox / ln
+                    vy = (1 if yy < h / 2 else -1) * oy / ln
+                elif px < py:
+                    dist, vx = px, (1 if xx < w / 2 else -1)
+                else:
+                    dist, vy = py, (1 if yy < h / 2 else -1)
+                t = 1 - dist / band
+                if t <= 0:
+                    continue
+                s = t * t * (3 - 2 * t) * scale
+                pts.append((j * cw + i, xx, yy, vx * s, vy * s))
+        if len(self.maps) > 48:
+            self.maps.clear()
+        self.maps[key] = (cw, ch, pts)
+        return self.maps[key]
+
+    def rim(self, widget, rect, radius, off):
+        """The panel's edge band, showing the frost pulled in from further inside
+        (a little more for red than blue, like real glass). None while resizing."""
+        if not self.settled or self.frost is None:
+            return None
+        w, h = int(rect.width()), int(rect.height())
+        if w < 24 or h < 18:
+            return None
+        x0, y0 = off.x() + rect.x(), off.y() + rect.y()
+        key = (id(widget), w, h, int(radius), int(x0), int(y0))
+        hit = self.rims.get(key)
+        if hit is not None:
+            return hit
+        cw, ch, pts = self._map(w, h, int(radius))
+        fw, fh, bpl, bits, S = self.frost.width(), self.frost.height(), self.frost.bytesPerLine(), self.bits, self.S
+        out = bytearray(cw * ch * 4)
+
+        def sample(c, X, Y):   # bilinear, one channel; frost bytes are B, G, R, A
+            u, v = X / S - .5, Y / S - .5
+            u = 0 if u < 0 else (fw - 1.001 if u > fw - 1.001 else u)
+            v = 0 if v < 0 else (fh - 1.001 if v > fh - 1.001 else v)
+            xi, yi = int(u), int(v)
+            fx, fy = u - xi, v - yi
+            k = yi * bpl + xi * 4 + c
+            k2 = k + bpl
+            return (bits[k] * (1 - fx) + bits[k + 4] * fx) * (1 - fy) + (bits[k2] * (1 - fx) + bits[k2 + 4] * fx) * fy
+
+        for idx, xx, yy, dx, dy in pts:
+            X, Y = x0 + xx, y0 + yy
+            o = idx * 4
+            out[o + 2] = int(sample(2, X + dx, Y + dy))                 # red, pulled furthest
+            out[o + 1] = int(sample(1, X + dx * .93, Y + dy * .93))
+            out[o] = int(sample(0, X + dx * .86, Y + dy * .86))
+            out[o + 3] = 255
+        img = QImage(bytes(out), cw, ch, cw * 4, QImage.Format_ARGB32).copy()
+        if len(self.rims) > 64:
+            self.rims.clear()
+        self.rims[key] = img
+        return img
+
+
+def paint_glass(p, widget, rect, radius, tint=70, glow=None, lit=False, rim=True):
+    """Draw a glass panel at rect (widget coordinates). False when the look isn't glass."""
+    win = widget.window()
+    g = getattr(win, "glass", None)
+    if g is None or not is_glass():
+        return False
+    g.ensure()
+    rect = QRectF(rect)
+    path = QPainterPath()
+    path.addRoundedRect(rect, radius, radius)
+    off = widget.mapTo(win, QPoint(0, 0))
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setRenderHint(QPainter.SmoothPixmapTransform)
+    # a soft shadow under the panel, so it floats
+    p.setPen(Qt.NoPen)
+    for grow, a in ((6, 10), (3, 16), (1, 22)):
+        sh = QPainterPath()
+        sh.addRoundedRect(rect.adjusted(-grow, -grow + 3, grow, grow + 4), radius + grow, radius + grow)
+        p.fillPath(sh, QColor(0, 0, 0, a))
+    p.setClipPath(path)
+    S = g.S
+    p.drawImage(rect, g.frost, QRectF((rect.x() + off.x()) / S, (rect.y() + off.y()) / S,
+                                      rect.width() / S, rect.height() / S))
+    bent = g.rim(widget, rect, radius, off) if rim else None
+    if bent is not None:
+        p.drawImage(rect, bent)
+    p.fillPath(path, QColor(14, 16, 24, tint))
+    sheen = QLinearGradient(0, rect.top(), 0, rect.bottom())
+    for at, a in ((0, 46 if lit else 34), (.34, 12), (.7, 4), (1, 15)):
+        sheen.setColorAt(at, QColor(255, 255, 255, a))
+    p.fillPath(path, sheen)
+    if glow:
+        gg = QRadialGradient(QPointF(rect.left(), rect.top()), max(rect.width(), rect.height()) * .75)
+        gg.setColorAt(0, qc(glow, 46))
+        gg.setColorAt(1, qc(glow, 0))
+        p.fillPath(path, gg)
+    p.setClipping(False)
+    # the rim: bright along the top-left, fading round the edge
+    edge = QLinearGradient(rect.topLeft(), rect.bottomRight())
+    for at, a in ((0, 150 if lit else 120), (.28, 34), (.55, 6), (.8, 26), (1, 80)):
+        edge.setColorAt(at, QColor(255, 255, 255, a))
+    p.setBrush(Qt.NoBrush)
+    p.setPen(QPen(edge, 1.0))
+    p.drawRoundedRect(rect.adjusted(.5, .5, -.5, -.5), radius - .5, radius - .5)
+    p.restore()
+    return True
+
+
+def tile_colour(hover=False):
+    """Fill for small tiles (presets, favourites): a lighter pane in glass, the old greys in classic."""
+    if is_glass():
+        return QColor(255, 255, 255, 30 if hover else 17)
+    return qc(T["hover"] if hover else T["raise"])
+
+
+def line_colour(alpha=255):
+    return QColor(255, 255, 255, int(alpha * .14)) if is_glass() else qc(T["line"], alpha)
+
+
+class GlassBox(QWidget):
+    """A plain container that is a glass capsule in the glass look (and nothing in classic)."""
+
+    def __init__(self, radius=18, tint=60, rim=False):
+        super().__init__()
+        self.radius, self.tint, self.rim = radius, tint, rim
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        paint_glass(p, self, QRectF(self.rect()).adjusted(1, 1, -1, -1), self.radius, self.tint, rim=self.rim)
+
+
+def glass_stylesheet():
+    """Extra rules for the glass look, on top of stylesheet()."""
+    pane, pane_hi, edge = "rgba(255,255,255,20)", "rgba(255,255,255,34)", "rgba(255,255,255,38)"
+    return f"""
+    QPushButton#tab {{ border: none; border-radius: 13px; margin: 0 1px; padding: 5px 15px; }}
+    QPushButton#tab:hover {{ background: rgba(255,255,255,14); }}
+    QPushButton#tab:checked {{ background: rgba(255,255,255,40); }}
+    QToolButton#more:hover {{ background: {pane_hi}; border-radius: 13px; }}
+    QToolButton#output {{ background: {pane}; border: 1px solid {edge}; border-radius: 12px; color: {T['text']}; }}
+    QToolButton#output:hover {{ background: {pane_hi}; }}
+    QPushButton#update {{ border-radius: 12px;
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #7FF3DB, stop:1 {ACCENT['chat']}); }}
+    QFrame#row {{ border: 1px solid transparent; border-radius: 12px; }}
+    QFrame#row:hover {{ background: {pane}; border-color: rgba(255,255,255,26); }}
+    QPushButton#ghost {{ background: {pane}; border: 1px solid {edge}; border-radius: 12px; }}
+    QPushButton#ghost:hover {{ background: {pane_hi}; }}
+    QLineEdit {{ background: rgba(0,0,0,70); border: 1px solid rgba(255,255,255,24); border-radius: 12px; }}
+    QLineEdit:focus {{ border-color: rgba(255,255,255,70); }}
+    QFrame#drawer {{ background: transparent; border: none; }}
+    QFrame#banner {{ border-radius: 14px; }}
+    QMenu {{ background: #1A1E2B; border: 1px solid rgba(255,255,255,30); }}
+    QMenu::item:selected {{ background: rgba(255,255,255,26); }}
+    QScrollBar::handle:vertical {{ background: rgba(255,255,255,40); border-radius: 3px; }}
+    QScrollBar::handle:vertical:hover {{ background: rgba(255,255,255,70); }}
+    QToolTip {{ background: #1A1E2B; border: 1px solid rgba(255,255,255,30); }}
     """
 
 
@@ -1281,7 +1584,7 @@ class PresetStore(QObject):
 
 def paint_thumb(p, rect, curve, colour, active=False):
     p.setPen(Qt.NoPen)
-    p.setBrush(qc(T["raise"]) if not active else qc(colour, 40))
+    p.setBrush(tile_colour() if not active else qc(colour, 40))
     p.drawRoundedRect(rect, 7, 7)
     inner = rect.adjusted(5, 6, -5, -6)
     if curve is None:
@@ -1369,6 +1672,11 @@ class AppCard(QFrame):
         faded = QPixmap(pm.size())
         faded.fill(Qt.transparent)
         p = QPainter(faded)
+        if is_glass():  # the card is see-through in glass: carry it on a small dark pane
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(QPen(QColor(255, 255, 255, 60), 1))
+            p.setBrush(QColor(24, 27, 38, 225))
+            p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 12, 12)
         p.setOpacity(0.85)
         p.drawPixmap(0, 0, pm)
         p.end()
@@ -1423,8 +1731,12 @@ class DialMeter(QWidget):
 
     def paintEvent(self, _):
         p = QPainter(self)
+        if paint_glass(p, self, QRectF(self.rect()).adjusted(2, 2, -2, -6), 24, tint=55, rim=True):
+            p.translate(24, 4)   # the readouts sit inside the glass pane
+            w = self.width() - 48
+        else:
+            w = self.width()
         p.setRenderHint(QPainter.Antialiasing)
-        w = self.width()
         side = 150
         dim = 255 if self.connected else 90
         big = QFont(self.font())
@@ -1458,7 +1770,7 @@ class DialMeter(QWidget):
         grad.setColorAt(1, qc(ACCENT["game"], 150 if self.connected else 50))
         p.setPen(QPen(grad, 4, Qt.SolidLine, Qt.RoundCap))
         p.drawLine(QPointF(x0, y), QPointF(x1, y))
-        p.setPen(QPen(qc(T["line"]), 1))
+        p.setPen(QPen(line_colour(), 1))
         for i in range(11):
             x = x0 + (x1 - x0) * i / 10
             tick = 7 if i in (0, 5, 10) else 4
@@ -1489,8 +1801,10 @@ class Column(QFrame):
         self.setAcceptDrops(True)
         self.setProperty("hover", False)
         self.setStyleSheet(f'QFrame#lane[hover="true"] {{ background: {rgba(accent, 24)}; border-radius: 14px; }}')
+        self.lit = False      # the pointer is over this lane (glass look: a brighter pane)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 6, 12, 6)
+        self.outer = outer
         outer.setSpacing(2)
         head = QHBoxLayout()
         title = QLabel(label)
@@ -1551,6 +1865,34 @@ class Column(QFrame):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         outer.addWidget(scroll, 1)
+
+    def apply_look(self):
+        self.outer.setContentsMargins(*((16, 14, 14, 10) if is_glass() else (12, 6, 12, 6)))
+
+    def paintEvent(self, e):
+        if not is_glass():
+            return super().paintEvent(e)
+        p = QPainter(self)
+        dropping = self.property("hover")
+        paint_glass(p, self, QRectF(self.rect()).adjusted(2, 2, -2, -4), 22, tint=60,
+                    glow=self.accent if self.key else None, lit=self.lit or dropping)
+        if dropping:   # an app is being dragged over: light the lane in its colour
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(QPen(qc(self.accent, 170), 1.6))
+            p.setBrush(qc(self.accent, 22))
+            p.drawRoundedRect(QRectF(self.rect()).adjusted(2.5, 2.5, -2.5, -4.5), 21.5, 21.5)
+
+    def enterEvent(self, e):
+        self.lit = True
+        if is_glass():
+            self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.lit = False
+        if is_glass():
+            self.update()
+        super().leaveEvent(e)
 
     def set_eq(self, spec, on, active):
         if self.eq_btn is None:
@@ -1637,6 +1979,7 @@ class MixerPage(QWidget):
         lay.addWidget(self.meter)
         lanes = QHBoxLayout()
         lanes.setSpacing(6)
+        self.lanes = lanes
         self.seps = []
         for i, (key, label, accent) in enumerate(COLUMNS):
             if i:
@@ -1651,6 +1994,13 @@ class MixerPage(QWidget):
         self.status = QLabel()
         self.status.setObjectName("hint")
         lay.addWidget(self.status)
+
+    def apply_look(self):
+        # glass: four separate panes with a gap; classic: one surface split by hairlines
+        self.lanes.setSpacing(12 if is_glass() else 6)
+        for sep in self.seps:
+            sep.setVisible(not is_glass())
+        self.meter.setFixedHeight(112 if is_glass() else 104)
 
 
 # -------------------------------------------------------- channels ---
@@ -1670,7 +2020,7 @@ class EqToggle(QPushButton):
         on = self.isChecked()
         track = QRectF(2, 3, 42, 20)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(self.colour) if on else QColor(T["line"]))
+        p.setBrush(QColor(self.colour) if on else (QColor(255, 255, 255, 46) if is_glass() else QColor(T["line"])))
         p.drawRoundedRect(track, 10, 10)
         p.setBrush(QColor(T["ink"]) if on else QColor(T["muted"]))
         p.drawEllipse(QPointF(track.right() - 10 if on else track.left() + 10, track.center().y()), 7, 7)
@@ -1717,9 +2067,11 @@ class EqDisplay(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         box = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(T["deep"]))
-        p.drawRoundedRect(box, 18, 18)
+        if not paint_glass(p, self, QRectF(self.rect()).adjusted(2, 2, -2, -6), 22, tint=150, glow=self.colour):
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(T["deep"]))
+            p.drawRoundedRect(box, 18, 18)
+        p.setRenderHint(QPainter.Antialiasing)
         r = box.adjusted(44, 18, -20, -30)
         small = QFont(self.font())
         small.setPointSizeF(8)
@@ -1732,7 +2084,7 @@ class EqDisplay(QWidget):
             return r.left() + r.width() * math.log10(hz / 20) / 3
 
         for db in (-12, -6, 0, 6, 12):
-            p.setPen(QPen(qc(T["line"], 255 if db == 0 else 140), 1))
+            p.setPen(QPen(line_colour(255 if db == 0 else 140), 1))
             p.drawLine(QPointF(r.left(), y_of(db)), QPointF(r.right(), y_of(db)))
             p.setPen(qc(T["faint"]))
             p.drawText(QRectF(box.left() + 6, y_of(db) - 8, 32, 16), Qt.AlignRight | Qt.AlignVCenter,
@@ -1740,7 +2092,7 @@ class EqDisplay(QWidget):
         for hz, name in ((20, "20"), (50, "50"), (100, "100"), (200, "200"), (500, "500"), (1000, "1k"),
                          (2000, "2k"), (5000, "5k"), (10000, "10k"), (20000, "20k")):
             x = x_of(hz)
-            p.setPen(QPen(qc(T["line"], 110), 1))
+            p.setPen(QPen(line_colour(110), 1))
             p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
             p.setPen(qc(T["faint"]))
             p.drawText(QRectF(x - 20, r.bottom() + 6, 40, 16), Qt.AlignCenter, name)
@@ -1795,7 +2147,7 @@ class FavStrip(QWidget):
         for i, r in enumerate(self.slot_rects()):
             r = r.adjusted(0.5, 0.5, -0.5, -0.5)
             if i >= len(self.items):
-                p.setPen(QPen(qc(T["line"] if i != self.hover else T["faint"]), 1.2, Qt.DashLine))
+                p.setPen(QPen(line_colour(255) if i != self.hover else qc(T["faint"]), 1.2, Qt.DashLine))
                 p.setBrush(Qt.NoBrush)
                 p.drawRoundedRect(r, 12, 12)
                 p.setPen(qc(T["faint"] if i != self.hover else T["muted"]))
@@ -1807,7 +2159,7 @@ class FavStrip(QWidget):
             src = self.items[i]
             active = src == current
             p.setPen(QPen(QColor(colour), 1.5) if active else Qt.NoPen)
-            p.setBrush(qc(T["hover"]) if i == self.hover else qc(T["raise"]))
+            p.setBrush(tile_colour(i == self.hover))
             p.drawRoundedRect(r, 12, 12)
             thumb = QRectF(r.left() + 8, r.top() + 8, r.width() - 16, r.height() - 34)
             curve = self.page.win.store.mini(src)
@@ -2024,7 +2376,7 @@ class PresetGrid(QWidget):
             active = src == current
             if i == self.hover or active:
                 p.setPen(Qt.NoPen)
-                p.setBrush(qc(colour, 26) if active else qc(T["raise"]))
+                p.setBrush(qc(colour, 26) if active else tile_colour(True))
                 p.drawRoundedRect(r, 12, 12)
             thumb = QRectF(r.left() + 8, r.top() + 9, 66, r.height() - 18)
             paint_thumb(p, thumb, self.page.win.store.mini(src), colour, active)
@@ -2141,6 +2493,14 @@ class BrowseDrawer(QFrame):
         foot.addWidget(self.note, 1)
         foot.addWidget(credit)
         lay.addLayout(foot)
+
+    def paintEvent(self, e):
+        # glass: a dark frosted sheet with its top corners rounded (it covers the page below)
+        if not is_glass():
+            return super().paintEvent(e)
+        p = QPainter(self)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, 0)
+        paint_glass(p, self, r.adjusted(0, 0, 0, 30), 24, tint=205, rim=False)
 
     def set_category(self, key):
         self.category = key
@@ -2467,10 +2827,13 @@ def _kga_quiet(*args):
 class Window(QWidget):
     def __init__(self):
         super().__init__()
+        global LOOK
+        LOOK = look_setting()
+        self.glass = Glass(self)
         self.setWindowTitle("ChatMix")
         self.setWindowIcon(QIcon.fromTheme("audio-headphones"))
         self.setPalette(dark_palette())
-        self.setAutoFillBackground(True)
+        self.setAutoFillBackground(not is_glass())
         self.setStyleSheet(stylesheet())
         self.resize(1120, 700)
         self.setMinimumSize(780, 520)
@@ -2493,10 +2856,17 @@ class Window(QWidget):
         bar = QHBoxLayout()
         bar.setContentsMargins(22, 4, 14, 0)
         bar.setSpacing(0)
+        self.bar = bar
         brand = QLabel("ChatMix")
         brand.setObjectName("brand")
         bar.addWidget(brand)
         bar.addSpacing(26)
+        # the tabs sit in a glass capsule in the glass look (a plain row in classic)
+        self.tabbox = GlassBox(radius=19, tint=50)
+        tabrow = QHBoxLayout(self.tabbox)
+        tabrow.setContentsMargins(0, 0, 0, 0)
+        tabrow.setSpacing(0)
+        self.tabrow = tabrow
         self.tabs = {}
         group = QButtonGroup(self)
         group.setExclusive(True)
@@ -2510,7 +2880,8 @@ class Window(QWidget):
             b.clicked.connect(lambda _=False, k=key: self.show_page(k))
             group.addButton(b)
             self.tabs[key] = b
-            bar.addWidget(b)
+            tabrow.addWidget(b)
+        bar.addWidget(self.tabbox)
         bar.addStretch(1)
         self.output_btn = QToolButton()
         self.output_btn.setObjectName("output")
@@ -2548,6 +2919,18 @@ class Window(QWidget):
         self.check_action = QAction("Check for updates", menu)
         self.check_action.triggered.connect(lambda: self.check_updates(force=True))
         menu.addAction(self.check_action)
+        menu.addSeparator()
+        looks = menu.addMenu("Look")
+        self.look_actions = {}
+        lg = QActionGroup(looks)
+        for key, label in LOOKS.items():
+            act = QAction(label, looks)
+            act.setCheckable(True)
+            act.setChecked(key == LOOK)
+            act.triggered.connect(lambda _=False, k=key: self.set_look(k))
+            lg.addAction(act)
+            looks.addAction(act)
+            self.look_actions[key] = act
         about = QAction(f"ChatMix {svc.__version__}", menu)
         about.setEnabled(False)
         menu.addAction(about)
@@ -2558,6 +2941,7 @@ class Window(QWidget):
         line.setObjectName("sep")
         line.setFixedHeight(1)
         root.addWidget(line)
+        self.sepline = line
 
         self.banner = QFrame()
         self.banner.setObjectName("banner")
@@ -2607,6 +2991,57 @@ class Window(QWidget):
         self.update_timer.setInterval(3600 * 1000)  # the check itself is cached for 12 hours
         self.update_timer.timeout.connect(self.check_updates)
         self.update_timer.start()
+        self.apply_look()
+
+    # ---- look (Liquid Glass or Classic)
+    def set_look(self, look):
+        global LOOK
+        if look not in LOOKS:
+            return
+        LOOK = look
+        try:
+            save_look(look)
+        except OSError:
+            pass
+        self.apply_look()
+
+    def apply_look(self):
+        glass = is_glass()
+        for key, act in self.look_actions.items():
+            act.setChecked(key == LOOK)
+        self.setAutoFillBackground(not glass)
+        self.setStyleSheet(stylesheet())
+        self.sepline.setVisible(not glass)
+        self.bar.setContentsMargins(*((18, 12, 14, 4) if glass else (22, 4, 14, 0)))
+        self.tabrow.setContentsMargins(*((4, 4, 4, 4) if glass else (0, 0, 0, 0)))
+        for b in self.tabs.values():  # the underline is the classic look's
+            colour = ACCENT.get([k for k, v in self.tabs.items() if v is b][0], T["text"])
+            b.setStyleSheet(f"QPushButton#tab:checked {{ color: {colour}; }}" if glass else
+                            f"QPushButton#tab:checked {{ color: {colour}; border-bottom-color: {colour}; }}")
+        self.mixer.apply_look()
+        for col in self.columns.values():
+            col.apply_look()
+        for page in self.channels.values():
+            page.update()
+        for w in self.findChildren(QWidget):
+            w.update()
+        self.update()
+
+    def paintEvent(self, e):
+        if is_glass():
+            self.glass.ensure()
+            p = QPainter(self)
+            if self.glass.backdrop.size() != self.size() * self.glass.backdrop.devicePixelRatio():
+                p.setRenderHint(QPainter.SmoothPixmapTransform)
+                p.drawPixmap(self.rect(), self.glass.backdrop)   # still resizing: stretch the old one
+            else:
+                p.drawPixmap(0, 0, self.glass.backdrop)
+            return
+        super().paintEvent(e)
+
+    def resizeEvent(self, e):
+        self.glass.resized()
+        super().resizeEvent(e)
 
     # ---- output (headset / speakers)
     def _fill_outputs(self):
@@ -2950,7 +3385,7 @@ class Window(QWidget):
             colour = ACCENT[key] if key else ACCENT["game"]
             col.set_cards([AppCard(self, c, colour) for c in cards
                            if c["column"] == key or (key is None and c["column"] not in shown)])
-        self.mixer.seps[1].setVisible("media" in shown)
+        self.mixer.seps[1].setVisible("media" in shown and not is_glass())
         levels = snap["levels"]
         self.mixer.meter.set_state(bool(self.present), levels.get("game"), levels.get("chat"),
                                    bool(on_dial) and mode != "never" and "media" in shown)
