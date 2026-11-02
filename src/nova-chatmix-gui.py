@@ -894,6 +894,72 @@ def run_update(info, progress=lambda message: None, kind=None, user_bin=None):
         shutil.rmtree(work, ignore_errors=True)
 
 
+# ------------------------------------------------------------ shortcuts ---
+# Global shortcuts go through KDE's own shortcut service (kglobalacceld), the
+# way System Settings sets them: they're the actions in nova-chatmix.desktop, so
+# KDE runs them even with ChatMix closed, keeps them across reboots, and lists
+# them under System Settings > Shortcuts > ChatMix. gdbus does the talking.
+
+SHORTCUT_COMPONENT = "nova-chatmix.desktop"
+SHORTCUT_ACTIONS = {"switch-output": "Switch headset / speakers", "headset": "Play through the headset",
+                    "speakers": "Play through the speakers"}
+SET_PRESENT, NO_AUTOLOADING = 2, 4  # kglobalacceld's setShortcutKeys flags
+
+
+class ShortcutError(Exception):
+    pass
+
+
+def _kga(method, *args):
+    if not shutil.which("gdbus"):
+        raise ShortcutError("KDE's shortcut service can't be reached (gdbus is missing)")
+    r = subprocess.run(["gdbus", "call", "--session", "--dest", "org.kde.kglobalaccel", "--object-path",
+                        "/kglobalaccel", "--method", "org.kde.KGlobalAccel." + method, *args],
+                       capture_output=True, text=True, timeout=5)
+    return r
+
+
+def _action_id(action):
+    return "[" + ", ".join(f"'{x}'" for x in (SHORTCUT_COMPONENT, action, "ChatMix", SHORTCUT_ACTIONS[action])) + "]"
+
+
+def _keys_from(text):
+    """Key codes from gdbus output like '([([268435532, 0, 0, 0],)],)'."""
+    return [int(g.split(",")[0]) for g in re.findall(r"\(\[(-?\d+(?:, -?\d+)*)\],?\)", text or "")
+            if int(g.split(",")[0])]
+
+
+def get_shortcut(action="switch-output"):
+    """The key code set for an action (Qt's key|modifiers number), 0 for none."""
+    r = _kga("shortcutKeys", _action_id(action))
+    if r.returncode != 0:  # not registered yet (or no KDE)
+        return 0
+    keys = _keys_from(r.stdout)
+    return keys[0] if keys else 0
+
+
+def set_shortcut(key, action="switch-output"):
+    """Give an action a global shortcut (key = Qt key code), or 0 to remove it."""
+    if key:
+        r = _kga("globalShortcutsByKey", f"([{key}, 0, 0, 0],)", "(0,)")
+        if r.returncode == 0:
+            taken = [m for m in re.findall(r"\('([^']*)', '([^']*)', '([^']*)', '([^']*)'", r.stdout)
+                     if m[2] != SHORTCUT_COMPONENT]
+            if taken:
+                raise ShortcutError(f"that's already the shortcut for \u201c{taken[0][1]}\u201d "
+                                    f"({taken[0][3] or taken[0][2]})")
+    if _kga("getComponent", f"'{SHORTCUT_COMPONENT}'").returncode != 0:
+        r = _kga("doRegister", _action_id(action))
+        if r.returncode != 0:
+            raise ShortcutError("KDE's shortcut service didn't answer: " + _tail(r.stderr, 2))
+    keys = f"[([{key}, 0, 0, 0],)]" if key else "@a(ai) []"
+    r = _kga("setShortcutKeys", _action_id(action), keys, f"uint32 {SET_PRESENT | NO_AUTOLOADING}")
+    if r.returncode != 0:
+        raise ShortcutError("KDE's shortcut service didn't answer: " + _tail(r.stderr, 2))
+    if get_shortcut(action) != key:
+        raise ShortcutError("KDE didn't accept that shortcut")
+
+
 def debug_dump():
     index = DesktopIndex()
     apps = scan_apps(index)
@@ -934,9 +1000,9 @@ from PySide6.QtCore import (QEasingCurve, QMimeData, QObject, QPoint, QPointF, Q
                             QProcessEnvironment, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl,
                             QVariantAnimation, Signal)
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QDrag, QFont, QFontMetrics, QIcon,  # noqa: E402
-                           QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap)
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QFileDialog, QFrame, QHBoxLayout,  # noqa: E402
-                               QLabel, QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy,
+                           QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap)
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QDialog, QFileDialog, QFrame, QHBoxLayout,  # noqa: E402
+                               QKeySequenceEdit, QLabel, QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy,
                                QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 AVATAR_COLOURS = ["#5B8DEF", "#E0697B", "#3FA796", "#C98A2E", "#8E6FD8", "#4AA3C7", "#D46FB0"]
@@ -2317,6 +2383,85 @@ class ChannelPage(QWidget):
         return f"{origin}.{quieter}"
 
 
+class ShortcutDialog(QDialog):
+    """Record a key (or a macro pad key) for switching headset / speakers."""
+
+    def __init__(self, parent, action="switch-output"):
+        super().__init__(parent)
+        self.action = action
+        self.setWindowTitle("ChatMix shortcut")
+        self.setMinimumWidth(440)
+        self.setPalette(dark_palette())
+        self.setAutoFillBackground(True)
+        self.setStyleSheet(f"QDialog {{ background: {T['ink']}; }}")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 20, 22, 18)
+        lay.setSpacing(12)
+        title = QLabel(SHORTCUT_ACTIONS[action])
+        title.setObjectName("drawerTitle")
+        info = QLabel("Press the keys you want to use. A macro pad key works too: set it to send a key "
+                      "combination nothing else uses (like Ctrl+Alt+F12), then press it here. It works "
+                      "everywhere, even with ChatMix closed.")
+        info.setObjectName("detail")
+        info.setWordWrap(True)
+        self.edit = QKeySequenceEdit()
+        try:
+            self.edit.setMaximumSequenceLength(1)
+        except AttributeError:  # Qt < 6.5
+            pass
+        self.current = get_shortcut(action)
+        if self.current:
+            self.edit.setKeySequence(QKeySequence(self.current))
+        self.status = QLabel("")
+        self.status.setObjectName("detail")
+        self.status.setWordWrap(True)
+        buttons = QHBoxLayout()
+        self.remove_btn = QPushButton("Remove")
+        self.remove_btn.setObjectName("ghost")
+        self.remove_btn.setEnabled(bool(self.current))
+        self.remove_btn.clicked.connect(lambda: self.save(0))
+        cancel = QPushButton("Cancel")
+        cancel.setObjectName("ghost")
+        cancel.clicked.connect(self.reject)
+        self.save_btn = QPushButton("Save")
+        self.save_btn.setObjectName("ghost")
+        self.save_btn.clicked.connect(lambda: self.save(self.key()))
+        buttons.addWidget(self.remove_btn)
+        buttons.addStretch(1)
+        buttons.addWidget(cancel)
+        buttons.addWidget(self.save_btn)
+        for w in (title, info, self.edit, self.status):
+            lay.addWidget(w)
+        lay.addLayout(buttons)
+        _kga_quiet("blockGlobalShortcuts", "true")  # so pressing an existing shortcut records it
+
+    def key(self):
+        seq = self.edit.keySequence()
+        return seq[0].toCombined() if seq.count() else 0
+
+    def save(self, key):
+        if key == 0 and self.sender() is self.save_btn:
+            self.status.setText("Press a key combination first.")
+            return
+        try:
+            set_shortcut(key, self.action)
+        except ShortcutError as e:
+            self.status.setText(f"Not saved: {e}.")
+            return
+        self.accept()
+
+    def done(self, r):
+        _kga_quiet("blockGlobalShortcuts", "false")
+        super().done(r)
+
+
+def _kga_quiet(*args):
+    try:
+        _kga(*args)
+    except Exception:
+        pass
+
+
 # ----------------------------------------------------------- window ---
 
 class Window(QWidget):
@@ -2476,10 +2621,37 @@ class Window(QWidget):
         for name, desc, headset in outputs:
             act = QAction(desc, self.output_menu)
             act.setCheckable(True)
-            act.setChecked(current == name or (headset and (current.startswith(PREFIX) or
-                                                              current == name)))
+            act.setChecked(current == name or (headset and current.startswith(PREFIX)))
             act.triggered.connect(lambda _=False, n=name: self.switch_output(n))
             self.output_menu.addAction(act)
+        self.output_menu.addSeparator()
+        key = get_shortcut() if shutil.which("gdbus") else 0
+        label = "Set a shortcut…" if not key else \
+            f"Shortcut: {QKeySequence(key).toString(QKeySequence.NativeText)}  (change…)"
+        act = QAction(label, self.output_menu)
+        act.triggered.connect(self.edit_shortcut)
+        self.output_menu.addAction(act)
+        shown = self.output_menu.addMenu("Show in this list")
+        hidden = svc.hidden_outputs()
+        for name, desc, headset in svc.list_outputs(include_hidden=True):
+            if headset:
+                continue
+            a = QAction(desc, shown)
+            a.setCheckable(True)
+            a.setChecked(name not in hidden)
+            a.triggered.connect(lambda on, n=name: self.set_output_shown(n, on))
+            shown.addAction(a)
+
+    def set_output_shown(self, name, shown):
+        data = _read_settings()
+        hidden = [h for h in data.get("hidden_outputs", []) if isinstance(h, str) and h != name]
+        if not shown:
+            hidden.append(name)
+        data["hidden_outputs"] = sorted(hidden)
+        _write_settings(data)
+
+    def edit_shortcut(self):
+        ShortcutDialog(self).exec()
 
     def switch_output(self, where):
         try:

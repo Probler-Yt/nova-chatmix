@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.0
+
+- **A global shortcut for headset / speakers, set from ChatMix.** Output menu > *Set a shortcut…*, press the keys (or a macro pad key) and save. ChatMix registers it with KDE's own shortcut service, so it works everywhere, even with the window closed, survives reboots, and shows up in System Settings > Shortcuts > ChatMix. While you're recording, KDE's other shortcuts are paused so pressing one records it, and a key that's already taken is refused with the name of what uses it.
+- **KDE's on-screen popup** shows "Headset" or your speakers' name when the shortcut switches.
+- **Hide outputs you never use:** output menu > *Show in this list*. Hidden outputs are left out of the menu and skipped by the shortcut.
+- ChatMix's app entry has *Switch headset / speakers*, *Play through the headset* and *Play through the speakers* actions (right-click it in the app launcher).
+
 ## 1.4.2
 
 - Fixes the Update button failing with "No such file or directory: …/packaging/aur/PKGBUILD": release downloads left out the package recipe the updater builds from. They include it again, and the updater fetches it from the release's tag if it's ever missing.

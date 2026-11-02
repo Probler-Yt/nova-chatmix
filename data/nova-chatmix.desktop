@@ -6,5 +6,23 @@ Comment=Drag apps between Game, Chat and Media on your Arctis Nova Pro dial
 Exec=@BINDIR@/nova-chatmix-gui
 Icon=audio-headphones
 Categories=AudioVideo;Audio;Mixer;
-Keywords=audio;chatmix;discord;arctis;steelseries;nova;sonar;
+Keywords=audio;chatmix;discord;arctis;steelseries;nova;sonar;speakers;headset;
 StartupWMClass=nova-chatmix
+Actions=switch-output;headset;speakers;
+
+# Global shortcuts for these live in KDE's System Settings > Shortcuts > ChatMix,
+# or set one from the ChatMix window (output menu > Set a shortcut).
+[Desktop Action switch-output]
+Name=Switch headset / speakers
+Icon=audio-headphones
+Exec=@BINDIR@/nova-chatmix --output toggle
+
+[Desktop Action headset]
+Name=Play through the headset
+Icon=audio-headphones
+Exec=@BINDIR@/nova-chatmix --output headset
+
+[Desktop Action speakers]
+Name=Play through the speakers
+Icon=audio-speakers
+Exec=@BINDIR@/nova-chatmix --output speakers

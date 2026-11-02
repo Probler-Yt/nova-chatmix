@@ -32,7 +32,7 @@ used: unknown ones get a USB STALL and can wedge it until a replug.
 Only needs Python 3 (stdlib) and pactl (pipewire-pulse).
 """
 
-__version__ = "1.4.2"
+__version__ = "1.5.0"
 
 import argparse
 import errno
@@ -406,7 +406,17 @@ def remembered_speakers():
         return None
 
 
-def list_outputs():
+def hidden_outputs():
+    """Outputs you've hidden in the window's output menu (also skipped by the toggle)."""
+    try:
+        with open(RULES_PATH) as f:
+            hidden = json.load(f).get("hidden_outputs", [])
+        return {h for h in hidden if isinstance(h, str)}
+    except (OSError, ValueError, AttributeError):
+        return set()
+
+
+def list_outputs(include_hidden=False):
     """[(name, description, is_headset)] for every output, the headset first."""
     sinks = pactl_json("sinks")
     dac = find_dac_sink()
@@ -414,9 +424,10 @@ def list_outputs():
     out = []
     if SINKS["game"][0] in names or dac:
         out.append((SINKS["game"][0] if SINKS["game"][0] in names else dac, "Headset (GameDAC)", True))
+    hidden = set() if include_hidden else hidden_outputs()
     for s in sinks:
         name = s.get("name", "")
-        if name.startswith(PREFIX) or name == dac or not name:
+        if name.startswith(PREFIX) or name == dac or not name or name in hidden:
             continue
         desc = s.get("description") or (s.get("properties") or {}).get("device.description") or name
         out.append((name, desc, False))
@@ -455,6 +466,18 @@ def choose_output(where):
     if not pick[2]:
         remember_speakers(pick[0])
     return pick[0], pick[1]
+
+
+def show_osd(text, icon):
+    """KDE's on-screen popup (like the volume one); does nothing elsewhere."""
+    if shutil.which("gdbus"):
+        subprocess.run(["gdbus", "call", "--session", "--dest", "org.kde.plasmashell",
+                        "--object-path", "/org/kde/osdService", "--method", "org.kde.osdService.showText",
+                        _gvariant_str(icon), _gvariant_str(text)], capture_output=True, timeout=3)
+
+
+def _gvariant_str(text):
+    return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def load_module(*args):
@@ -1551,8 +1574,17 @@ def main():
         try:
             name, desc = choose_output(args.output)
         except Exception as e:
+            try:
+                show_osd(f"Couldn't switch: {e}", "dialog-warning")
+            except Exception:
+                pass
             sys.exit(f"nova-chatmix: {e}")
         print(f"Sound now plays through {desc}")
+        try:
+            headset = name.startswith(PREFIX) or desc.startswith("Headset")
+            show_osd("Headset" if headset else desc, "audio-headphones" if headset else "audio-speakers")
+        except Exception:
+            pass
         return
 
     d = Daemon(args)
