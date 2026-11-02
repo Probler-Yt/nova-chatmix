@@ -1,6 +1,6 @@
 # Keep release tarballs lean: users and the AUR package don't need these.
+# (packaging/ stays in: the window's Update button builds the package from it.)
 .github     export-ignore
-packaging   export-ignore
 scripts     export-ignore
 docs        export-ignore
 .gitattributes export-ignore

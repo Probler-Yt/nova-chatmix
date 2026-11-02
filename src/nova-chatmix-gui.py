@@ -860,11 +860,17 @@ def run_update(info, progress=lambda message: None, kind=None, user_bin=None):
             progress("Building the package…")
             build = os.path.join(work, "build")
             os.makedirs(build)
-            pkgbuild = open(os.path.join(top, "packaging", "aur", "PKGBUILD")).read()
-            pkgbuild = re.sub(r"(?m)^pkgver=.*$", f"pkgver={ver}", pkgbuild)
-            with open(os.path.join(build, "PKGBUILD"), "w") as f:
-                f.write(pkgbuild)
-            shutil.copy(os.path.join(top, "packaging", "aur", "nova-chatmix.install"), build)
+            aur = os.path.join(top, "packaging", "aur")
+            for fn in ("PKGBUILD", "nova-chatmix.install"):
+                path = os.path.join(aur, fn)
+                if os.path.exists(path):
+                    data = open(path, "rb").read()
+                else:  # releases before 1.4.2 left the packaging folder out
+                    data = _http_get(f"https://raw.githubusercontent.com/{REPO}/v{ver}/packaging/aur/{fn}")
+                if fn == "PKGBUILD":
+                    data = re.sub(rb"(?m)^pkgver=.*$", f"pkgver={ver}".encode(), data)
+                with open(os.path.join(build, fn), "wb") as f:
+                    f.write(data)
             shutil.copy(tarball, build)  # so makepkg doesn't download it again
             r = subprocess.run(["makepkg", "-f", "--noconfirm", "--skipchecksums"], cwd=build,
                                capture_output=True, text=True)

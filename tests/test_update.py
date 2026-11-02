@@ -57,19 +57,28 @@ def log():
 
 
 # --- a release tarball, built like CI builds it
-def make_release(version, claims=None):
-    base = os.path.join(tmp, f"rel-{version}-{claims}")
+def release_files():
+    """What `git archive` puts in a release: tracked files minus .gitattributes' export-ignore."""
+    import subprocess
+    files = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True).stdout.split()
+    attrs = subprocess.run(["git", "check-attr", "export-ignore", "--"] + files, cwd=ROOT,
+                           capture_output=True, text=True).stdout.splitlines()
+    ignored = {line.split(":")[0] for line in attrs if line.endswith(": set")}
+    return [f for f in files if f not in ignored and os.path.isfile(os.path.join(ROOT, f))]
+
+
+def make_release(version, claims=None, drop=()):
+    import shutil
+    base = os.path.join(tmp, f"rel-{version}-{claims}-{len(drop)}")
     top = os.path.join(base, f"nova-chatmix-{version}")
-    os.makedirs(os.path.join(top, "src"))
-    os.makedirs(os.path.join(top, "packaging", "aur"))
-    for f in ("nova-chatmix.py", "nova-chatmix-gui.py"):
-        text = open(os.path.join(SRC, f)).read()
-        if f == "nova-chatmix.py":
-            text = text.replace(f'__version__ = "{svc.__version__}"', f'__version__ = "{claims or version}"')
-        open(os.path.join(top, "src", f), "w").write(text)
-    for f in ("PKGBUILD", "nova-chatmix.install"):
-        open(os.path.join(top, "packaging", "aur", f), "w").write(
-            open(os.path.join(ROOT, "packaging", "aur", f)).read())
+    for f in release_files():
+        if any(f.startswith(d) for d in drop):
+            continue
+        os.makedirs(os.path.dirname(os.path.join(top, f)), exist_ok=True)
+        shutil.copyfile(os.path.join(ROOT, f), os.path.join(top, f))
+    path = os.path.join(top, "src", "nova-chatmix.py")
+    text = open(path).read()
+    open(path, "w").write(text.replace(f'__version__ = "{svc.__version__}"', f'__version__ = "{claims or version}"'))
     out = os.path.join(base, f"nova-chatmix-{version}.tar.gz")
     with tarfile.open(out, "w:gz") as t:
         t.add(top, arcname=f"nova-chatmix-{version}")
@@ -135,6 +144,26 @@ check(len(pk) == 1 and pk[0].startswith("pkexec pacman -U --noconfirm ") and
 check(any("password" in s for s in steps), "...and says a password is coming")
 check(not [d for d in os.listdir(tempfile.gettempdir()) if d.startswith("nova-chatmix-update-")],
       "temporary files cleaned up")
+
+check("packaging/aur/PKGBUILD" in release_files(), "release downloads include the package recipe")
+OLD = make_release(NEW, drop=("packaging/",))  # how releases before 1.4.2 were made
+raw = []
+
+
+def old_get(url, timeout=10):
+    if url == URL:
+        return OLD
+    if url.startswith(f"https://raw.githubusercontent.com/{gui.REPO}/v{NEW}/packaging/aur/"):
+        raw.append(url.rsplit("/", 1)[1])
+        return open(os.path.join(ROOT, "packaging", "aur", raw[-1]), "rb").read()
+    raise OSError("unexpected URL " + url)
+
+
+gui._http_get = old_get
+open(LOG, "w").close()
+check(gui.run_update(info, kind="package") == NEW and sorted(raw) == ["PKGBUILD", "nova-chatmix.install"],
+      "a release without the recipe still installs (recipe fetched from the release's tag)")
+gui._http_get = fake_get
 
 os.environ["FAKE_PKEXEC_RC"] = "126"
 try:

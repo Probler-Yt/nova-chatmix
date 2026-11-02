@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.2
+
+- Fixes the Update button failing with "No such file or directory: …/packaging/aur/PKGBUILD": release downloads left out the package recipe the updater builds from. They include it again, and the updater fetches it from the release's tag if it's ever missing.
+
 ## 1.4.1
 
 - **Headset / speakers switching, like Sonar's hotkey.** `nova-chatmix --output toggle` switches between the headset and your speakers; put it on a keyboard shortcut or a macro pad key. `--output headset` and `--output speakers` go one way. "Speakers" is whichever other output you last used. ChatMix knows what counts as the headset, so it never fights you: a home-made switch script that checks for the GameDAC's own name sees "Game" instead, switches to the GameDAC, and ChatMix moves it straight back to Game.

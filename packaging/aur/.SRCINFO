@@ -1,6 +1,6 @@
 pkgbase = nova-chatmix
 	pkgdesc = Hardware ChatMix dial for the SteelSeries Arctis Nova Pro Wired on Linux, with drag-and-drop app routing and per-output EQ
-	pkgver = 1.4.1
+	pkgver = 1.4.2
 	pkgrel = 1
 	url = https://github.com/Probler-Yt/nova-chatmix
 	install = nova-chatmix.install
@@ -10,7 +10,7 @@ pkgbase = nova-chatmix
 	depends = libpulse
 	depends = pyside6
 	optdepends = pipewire-pulse: the sound server it is built and tested for (the EQ also needs pipewire itself)
-	source = nova-chatmix-1.4.1.tar.gz::https://github.com/Probler-Yt/nova-chatmix/releases/download/v1.4.1/nova-chatmix-1.4.1.tar.gz
+	source = nova-chatmix-1.4.2.tar.gz::https://github.com/Probler-Yt/nova-chatmix/releases/download/v1.4.2/nova-chatmix-1.4.2.tar.gz
 	sha256sums = SKIP
 
 pkgname = nova-chatmix
