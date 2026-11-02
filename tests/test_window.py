@@ -356,5 +356,46 @@ w.set_look("glass")
 app.processEvents()
 check(gui.LOOK == "glass" and not w.autoFillBackground() and w.mixer.seps[0].isHidden(),
       "and back to Liquid Glass")
+
+# --- the glass's background: your desktop wallpaper, else ChatMix's colours
+from PySide6.QtGui import QImage  # noqa: E402
+check(w.backdrop == "wallpaper" and w.glass.picture is None
+      and w.backdrop_actions["wallpaper"].text().endswith("(couldn't find it)"),
+      "no desktop wallpaper to be found: ChatMix's colours, and the menu says why")
+walls = tempfile.mkdtemp()
+pkg = os.path.join(walls, "Next", "contents", "images")
+os.makedirs(pkg)
+for name, colour in (("1280x720.png", "#0000FF"), ("3840x2160.png", "#FF2020")):
+    img = QImage(64, 36, QImage.Format_RGB32)
+    img.fill(QColor(colour))
+    img.save(os.path.join(pkg, name))
+old = os.path.join(walls, "old.png")
+QImage(8, 8, QImage.Format_RGB32).save(old)
+rc = os.path.join(gui.config_home(), gui.PLASMA_RC)
+with open(rc, "w") as f:  # a panel, a desktop on the image plugin, and a slideshow it used to have
+    f.write("[Containments][2]\nlastScreen=0\nplugin=org.kde.panel\n\n"
+            "[Containments][7]\nlastScreen=0\nwallpaperplugin=org.kde.image\n\n"
+            f"[Containments][7][Wallpaper][org.kde.slideshow][General]\nSlidePaths={walls}/nope/\n\n"
+            f"[Containments][7][Wallpaper][org.kde.image][General]\nImage=file://{walls}/Next/\n\n"
+            f"[Containments][9]\nlastScreen=1\nwallpaperplugin=org.kde.image\n\n"
+            f"[Containments][9][Wallpaper][org.kde.image][General]\nImage={old}\n")
+check(gui.desktop_wallpaper() == os.path.join(pkg, "3840x2160.png"),
+      f"finds KDE's wallpaper: main screen, the plugin in use, biggest picture in a package ({gui.desktop_wallpaper()})")
+w.load_wallpaper()
+app.processEvents()
+img = w.grab().toImage()
+c = img.pixelColor(4, img.height() - 4)
+check(w.glass.picture is not None and c.red() > c.green() + 20 and c.red() > c.blue() + 20,
+      f"the glass sits on your wallpaper (dimmed): corner {c.name()}")
+check(w.backdrop_actions["wallpaper"].text() == "Your desktop wallpaper", "...and the menu stops saying it's missing")
+w.backdrop_actions["colours"].trigger()
+app.processEvents()
+c = w.grab().toImage().pixelColor(4, img.height() - 4)
+check(w.glass.picture is None and not (c.red() > c.green() + 20 and c.red() > c.blue() + 20)
+      and json.load(open(svc.RULES_PATH)).get("backdrop") == "colours",
+      f"ChatMix colours instead, and that's saved: corner {c.name()}")
+check(gui.backdrop_setting() == "colours", "the next window opens with ChatMix's colours")
+w.set_backdrop("wallpaper")
+check(w.glass.picture is not None, "and back to the wallpaper")
 w.close()
 check.done()

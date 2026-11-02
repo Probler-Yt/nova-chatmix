@@ -996,7 +996,7 @@ if "--debug" in sys.argv:
     debug_dump()
     sys.exit(0)
 
-from PySide6.QtCore import (QEasingCurve, QMimeData, QObject, QPoint, QPointF, QProcess,  # noqa: E402
+from PySide6.QtCore import (QEasingCurve, QFileSystemWatcher, QMimeData, QObject, QPoint, QPointF, QProcess,  # noqa: E402
                             QProcessEnvironment, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl,
                             QVariantAnimation, Signal)
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices, QDrag, QFont, QFontMetrics, QIcon,  # noqa: E402
@@ -1132,9 +1132,127 @@ def is_glass():
     return LOOK == "glass"
 
 
-def paint_backdrop(p, w, h):
-    """Soft ribbons in the channel colours over near-black: what the glass sits on."""
+# What the glass sits on: your desktop wallpaper (the default, when it can be
+# found) or ChatMix's own ribbons in the channel colours.
+BACKDROPS = {"wallpaper": "Your desktop wallpaper", "colours": "ChatMix colours"}
+PLASMA_RC = "plasma-org.kde.plasma.desktop-appletsrc"
+PICTURE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".avif", ".jxl", ".bmp")
+
+
+def backdrop_setting():
+    b = _read_settings().get("backdrop", "wallpaper")
+    return b if b in BACKDROPS else "wallpaper"
+
+
+def save_backdrop(b):
+    data = _read_settings()
+    data["backdrop"] = b
+    _write_settings(data)
+
+
+def config_home():
+    return os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+
+
+def _picture_in(value):
+    """A wallpaper setting's value -> a picture file. Handles plain files, file:// URLs,
+    KDE wallpaper packages (folders with contents/images) and slideshow folders."""
+    from urllib.parse import unquote
+    path = unquote(value[7:]) if value.startswith("file://") else value
+    path = os.path.expanduser(path.strip())
+    if os.path.isfile(path):
+        return path
+    if not os.path.isdir(path):
+        return None
+    # a package: the largest picture it ships (the dark variant first; ChatMix is dark)
+    for sub in ("contents/images_dark", "contents/images", ""):
+        d = os.path.join(path, sub)
+        if not os.path.isdir(d):
+            continue
+        best, size = None, -1
+        for f in sorted(os.listdir(d)):
+            if not f.lower().endswith(PICTURE_EXT):
+                continue
+            m = re.match(r"(\d+)x(\d+)", f)
+            n = int(m.group(1)) * int(m.group(2)) if m else os.path.getsize(os.path.join(d, f))
+            if n > size:
+                best, size = os.path.join(d, f), n
+        if best:
+            return best
+    return None
+
+
+def desktop_wallpaper():
+    """The picture on your desktop, or None. KDE Plasma (the main screen's first),
+    then GNOME and its relatives through gsettings."""
+    try:
+        with open(os.path.join(config_home(), PLASMA_RC), encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        text = ""
+    plugin, screen, found, group = {}, {}, [], []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            group = re.findall(r"\[([^\]]*)\]", line)
+            continue
+        if "=" not in line or len(group) < 2 or group[0] != "Containments":
+            continue
+        k, v = line.split("=", 1)
+        cid = group[1]
+        if len(group) == 2 and k == "wallpaperplugin":
+            plugin[cid] = v
+        elif len(group) == 2 and k == "lastScreen":
+            screen[cid] = int(v) if v.lstrip("-").isdigit() else 99
+        elif len(group) == 5 and group[2] == "Wallpaper" and group[4] == "General":
+            if (group[3], k) in (("org.kde.image", "Image"), ("org.kde.slideshow", "SlidePaths")):
+                found.append((cid, group[3], v.split(",")[0]))
+    # the wallpaper each desktop actually uses (old settings for other plugins linger), main screen first
+    found.sort(key=lambda c: (plugin.get(c[0], c[1]) != c[1], screen.get(c[0], 99) if screen.get(c[0], 99) >= 0 else 98))
+    for _, _, value in found:
+        pic = _picture_in(value)
+        if pic:
+            return pic
+    if "GNOME" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper() and shutil.which("gsettings"):
+        for key in ("picture-uri-dark", "picture-uri"):
+            try:
+                out = subprocess.run(["gsettings", "get", "org.gnome.desktop.background", key],
+                                     capture_output=True, text=True, timeout=2).stdout.strip().strip("'")
+            except (OSError, subprocess.SubprocessError):
+                continue
+            pic = _picture_in(out) if out else None
+            if pic:
+                return pic
+    return None
+
+
+def load_picture(path, longest=2560):
+    """The wallpaper as an image, shrunk to a sensible size (it's going behind glass)."""
+    img = QImage(path) if path else QImage()
+    if img.isNull():
+        return None
+    if max(img.width(), img.height()) > longest:
+        img = img.scaled(longest, longest, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    return img
+
+
+def paint_backdrop(p, w, h, picture=None):
+    """What the glass sits on: the wallpaper, dimmed so text stays readable, or
+    soft ribbons in the channel colours over near-black."""
     import math
+    if picture is not None:
+        k = max(w / picture.width(), h / picture.height())   # fill the window, like a desktop does
+        dw, dh = picture.width() * k, picture.height() * k
+        # slightly out of focus, as if it's behind the window: drawn small, then stretched back
+        soft = picture.scaled(max(1, int(dw / 3)), max(1, int(dh / 3)), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.drawImage(QRectF((w - dw) / 2, (h - dh) / 2, dw, dh), soft)
+        p.fillRect(QRectF(0, 0, w, h), QColor(4, 6, 12, 120))
+        top = QLinearGradient(0, 0, 0, h * .3)          # a little darker behind the top bar
+        top.setColorAt(0, QColor(4, 6, 12, 90))
+        top.setColorAt(1, QColor(4, 6, 12, 0))
+        p.fillRect(QRectF(0, 0, w, h * .3), top)
+        return
     p.fillRect(QRectF(0, 0, w, h), QColor("#090B12"))
     for cx, cy, colour, a in ((.08, .05, ACCENT["chat"], 70), (.98, .30, ACCENT["media"], 75),
                               (.30, 1.05, ACCENT["game"], 55)):
@@ -1180,6 +1298,7 @@ class Glass:
         self.win = win
         self.size = QSize()
         self.backdrop = self.frost = self.bits = None
+        self.picture = None          # the wallpaper, when the backdrop is your desktop's
         self.maps, self.rims = {}, {}
         self.settled = True          # False while the window is being resized
         self.settle = QTimer(win)
@@ -1190,6 +1309,13 @@ class Glass:
     def resized(self):
         self.settled = False
         self.settle.start()
+
+    def set_picture(self, picture):
+        """New backdrop picture (None = ChatMix's ribbons): repaint everything."""
+        self.picture = picture
+        self.backdrop = None
+        self.rims.clear()
+        self.win.update()
 
     def _settled(self):
         self.settled = True
@@ -1206,7 +1332,7 @@ class Glass:
         pm.setDevicePixelRatio(dpr)
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing)
-        paint_backdrop(p, w, h)
+        paint_backdrop(p, w, h, self.picture)
         p.end()
         self.backdrop = pm
         # frost: shrink hard, grow back to a quarter size (a blur, done by Qt in C++),
@@ -2148,7 +2274,7 @@ class FavStrip(QWidget):
             r = r.adjusted(0.5, 0.5, -0.5, -0.5)
             if i >= len(self.items):
                 p.setPen(QPen(line_colour(255) if i != self.hover else qc(T["faint"]), 1.2, Qt.DashLine))
-                p.setBrush(Qt.NoBrush)
+                p.setBrush(QColor(10, 12, 20, 90) if is_glass() else Qt.NoBrush)
                 p.drawRoundedRect(r, 12, 12)
                 p.setPen(qc(T["faint"] if i != self.hover else T["muted"]))
                 f = QFont(self.font())
@@ -2931,6 +3057,23 @@ class Window(QWidget):
             lg.addAction(act)
             looks.addAction(act)
             self.look_actions[key] = act
+        looks.addSection("Glass background")
+        self.backdrop = backdrop_setting()
+        self.backdrop_actions = {}
+        bg = QActionGroup(looks)
+        for key, label in BACKDROPS.items():
+            act = QAction(label, looks)
+            act.setCheckable(True)
+            act.setChecked(key == self.backdrop)
+            act.triggered.connect(lambda _=False, k=key: self.set_backdrop(k))
+            bg.addAction(act)
+            looks.addAction(act)
+            self.backdrop_actions[key] = act
+        # follow the desktop: KDE rewrites its config when you change the wallpaper
+        self.wall_path, self.wall_stamp = None, None
+        self.wall_watch = QFileSystemWatcher(self)
+        self.wall_watch.fileChanged.connect(lambda _: QTimer.singleShot(400, self.load_wallpaper))
+        self.wall_watch.directoryChanged.connect(lambda _: QTimer.singleShot(400, self.load_wallpaper))
         about = QAction(f"ChatMix {svc.__version__}", menu)
         about.setEnabled(False)
         menu.addAction(about)
@@ -3005,10 +3148,45 @@ class Window(QWidget):
             pass
         self.apply_look()
 
+    def set_backdrop(self, backdrop):
+        if backdrop not in BACKDROPS:
+            return
+        self.backdrop = backdrop
+        try:
+            save_backdrop(backdrop)
+        except OSError:
+            pass
+        self.load_wallpaper(force=True)
+
+    def load_wallpaper(self, force=False):
+        """Put your desktop wallpaper behind the glass (or the ribbons, if it's off or can't be found)."""
+        for key, act in self.backdrop_actions.items():
+            act.setChecked(key == self.backdrop)
+        rc = os.path.join(config_home(), PLASMA_RC)
+        for watch in (rc, config_home()):   # KDE saves by replacing the file, so watch its folder too
+            if os.path.exists(watch) and watch not in self.wall_watch.files() + self.wall_watch.directories():
+                self.wall_watch.addPath(watch)
+        path = desktop_wallpaper() if self.backdrop == "wallpaper" else None
+        try:
+            stamp = (path, os.path.getmtime(path)) if path else None
+        except OSError:
+            stamp = None
+        if not force and stamp == self.wall_stamp:
+            return
+        self.wall_stamp = stamp
+        self.wall_path = path
+        found = self.backdrop != "wallpaper" or path is not None
+        self.backdrop_actions["wallpaper"].setText(BACKDROPS["wallpaper"] + ("" if found else " (couldn't find it)"))
+        self.glass.set_picture(load_picture(path) if path else None)
+
     def apply_look(self):
         glass = is_glass()
         for key, act in self.look_actions.items():
             act.setChecked(key == LOOK)
+        for act in self.backdrop_actions.values():
+            act.setEnabled(glass)
+        if glass and self.wall_stamp is None and self.glass.picture is None:
+            self.load_wallpaper(force=True)
         self.setAutoFillBackground(not glass)
         self.setStyleSheet(stylesheet())
         self.sepline.setVisible(not glass)
