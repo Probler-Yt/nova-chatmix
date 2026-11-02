@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.2
+
+- **Switching to your speakers works properly.** Pick any other output in your system's sound settings (or with a macro pad, `pactl set-default-sink`...) and ChatMix lets go: every app it was holding in Game, Chat or Media, YouTube in Media included, moves to that output, and anything that starts meanwhile goes there too. Pick the GameDAC again and they all go back to their channels, with Game as the default. If you're already on speakers when ChatMix starts, it leaves them alone. The window shows a note while you're on another output.
+
 ## 1.3.1
 
 - **Fixes the dial going dead** (pressing it no longer switching to ChatMix, turning it doing nothing) after a replug or a DAC reset. ChatMix is now switched on the way SteelSeries GG does it: the DAC is asked for its status and firmware version first, and the ChatMix switch gets a quiet second either side, without which the DAC can accept it and still ignore the dial. The firmware version is shown in the service log.

@@ -307,17 +307,22 @@ def audio_snapshot():
             "title": (props.get("media.name") or "").strip(),
         })
     state = svc._read(svc.STATE_PATH)
-    eq_state, dial_state = {}, {}
+    eq_state, dial_state, away = {}, {}, None
     if state:  # the service publishes the dial position; more reliable than guessing
         try:
             st = json.loads(state)
             levels.update({k: v for k, v in st.get("levels", {}).items() if v is not None})
             eq_state = st.get("eq", {}) if isinstance(st.get("eq"), dict) else {}
             dial_state = {"chat_busy": bool(st.get("chat_busy")), "media_on_dial": st.get("media_on_dial")}
+            away = st.get("away") or None
         except ValueError:
             pass
+    away_name = None
+    if away:
+        hit = next((x for x in sinks if x.get("name") == away), {})
+        away_name = hit.get("description") or (hit.get("properties") or {}).get("device.description") or away
     return {"present": present, "levels": levels, "streams": streams, "errors": errors,
-            "eq_state": eq_state, "dial": dial_state}
+            "eq_state": eq_state, "dial": dial_state, "away": away_name}
 
 
 def build_cards(apps, snap, rules, index=None):
@@ -2375,9 +2380,10 @@ class Window(QWidget):
             r = safe_pactl("get-default-sink")
             sink = r.stdout.strip() if r and r.returncode == 0 else ""
         save_rules(rules)
-        for idx in card.get("indices") or []:
-            if sink:
-                safe_pactl("move-sink-input", str(idx), sink)
+        if not self.snap.get("away"):  # on speakers the rule waits until you're back on the headset
+            for idx in card.get("indices") or []:
+                if sink:
+                    safe_pactl("move-sink-input", str(idx), sink)
         self.refresh()
 
     def reset_dac(self):
@@ -2436,6 +2442,12 @@ class Window(QWidget):
             self.banner.setVisible(True)
             self.banner_btn.setVisible(False)
             self.banner_text.setText("Couldn't read your audio setup: " + "; ".join(snap["errors"]))
+        elif self.present and snap.get("away"):
+            self.banner.setVisible(True)
+            self.banner_btn.setVisible(False)
+            self.banner_text.setText(f"Playing through {snap['away']}, so ChatMix has let go of your apps. "
+                                     "Switch your output back to the headset and they go back to Chat, "
+                                     "Media and Game.")
         elif not self.present:
             self.banner.setVisible(True)
             self.banner_btn.setVisible(True)

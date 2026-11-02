@@ -120,4 +120,12 @@ a.build()
 check(len(state()["modules"]) == 6, "works on PipeWire versions without *_dont_move")
 svc.Audio(a.dac_sink, True, True).build()
 check(len(state()["modules"]) == 6, "leftovers from a crashed run cleaned up")
+write_state({"default": "alsa_output.pci-0000_0c_00.4.analog-stereo"})  # speakers picked before ChatMix starts
+a = svc.Audio("alsa_output.usb-SteelSeries_Arctis_Nova_Pro_Wired-00.analog-stereo", True, True)
+a.build()
+check(a.away == "alsa_output.pci-0000_0c_00.4.analog-stereo" and state()["default"] == a.away,
+      "starting while you're on speakers: ChatMix leaves the default output alone")
+setstate(default=a.dac_sink)
+check(a.follow_default() and a.away is None and state()["default"] == "ChatMix_Game",
+      "picking the GameDAC later hands it over to ChatMix")
 check.done()

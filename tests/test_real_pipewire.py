@@ -102,6 +102,46 @@ save_settings()
 check(wait(lambda: media_vol() == "25%" and json.load(open(svc.STATE_PATH)).get("media_dial") == "auto"),
       "back to auto (the default); the window can see the mode")
 
+# --- switching the system output to speakers (e.g. from KDE or a macro pad) and back
+subprocess.run(["pactl", "load-module", "module-null-sink", "sink_name=Speakers"], capture_output=True, check=True)
+with wave.open(os.path.join(root, "long.wav"), "wb") as w:
+    w.setnchannels(2)
+    w.setsampwidth(2)
+    w.setframerate(48000)
+    w.writeframes(bytes(48000 * 30 * 4))
+
+
+def sink_of(app):
+    names = {str(x["index"]): x["name"] for x in pj("sinks")}
+    hit = [names.get(str(si["sink"])) for si in pj("sink-inputs")
+           if si["properties"].get("application.name") == app]
+    return hit[0] if hit else None
+
+
+yt = subprocess.Popen(["pw-play", "--target", "ChatMix_Media", "-P", "application.name=YouTube",
+                       os.path.join(root, "long.wav")])
+check(wait(lambda: sink_of("YouTube") == "ChatMix_Media"), "YouTube playing through Media")
+subprocess.run(["pactl", "set-default-sink", "Speakers"], check=True)
+check(wait(lambda: sink_of("YouTube") == "Speakers", 5), "switch the output to speakers: ChatMix lets go of YouTube")
+check(wait(lambda: json.load(open(svc.STATE_PATH)).get("away") == "Speakers"), "...and tells the window")
+late = subprocess.Popen(["pw-play", "--target", "ChatMix_Chat", "-P", "application.name=LateCall",
+                         os.path.join(root, "long.wav")])
+check(wait(lambda: sink_of("LateCall") == "Speakers", 5), "something that starts on a ChatMix output meanwhile goes to the speakers too")
+peer["sock"].send(bytes([7, 0x45, 100, 25]) + bytes(12))
+time.sleep(1)
+check(pj("sinks") and next(x for x in pj("sinks") if x["name"] == "Speakers") is not None and
+      subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True).stdout.strip() == "Speakers",
+      "ChatMix doesn't take the default output back while you're on speakers")
+subprocess.run(["pactl", "set-default-sink", realpw.DAC], check=True)
+check(wait(lambda: subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True).stdout.strip()
+           == "ChatMix_Game", 5), "switch back to the GameDAC: Game is the default again")
+check(wait(lambda: sink_of("YouTube") == "ChatMix_Game" and sink_of("LateCall") == "ChatMix_Game", 5),
+      "...and the apps it let go of come back through ChatMix")
+check(wait(lambda: json.load(open(svc.STATE_PATH)).get("away") is None), "...and the window is told")
+yt.kill()
+late.kill()
+peer["sock"].send(bytes([7, 0x45, 100, 100]) + bytes(12))
+
 # --- the DAC blinks: reconnect + ChatMix back on
 peer["sock"].settimeout(0.2)
 try:

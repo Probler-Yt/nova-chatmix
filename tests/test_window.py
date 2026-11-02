@@ -310,5 +310,17 @@ check(media.dial_btn.text() == "Dial: On" and [a.data() for a in media.dial_btn.
 next(a for a in media.dial_btn.menu().actions() if a.data() == "never").trigger()
 service_state(media_dial="never", chat_busy=False, media_on_dial=False, levels={"game": 100, "chat": 40, "media": 100})
 check(media.level.text() == "" and "never" in media.caption.text(), "Off: no dial level shown for Media")
+# --- on speakers: the window says so, and assigning an app doesn't pull it back to the headset
+service_state(away="alsa_output.pci-0000_0c_00.4.analog-stereo", media_dial="auto")
+check(w.banner.isVisibleTo(w) and "Playing through" in w.banner_text.text() and "let go" in w.banner_text.text(),
+      f"banner explains ChatMix let go: {w.banner_text.text()!r}")
+before = {x["index"]: x["sink"] for x in read_state()["streams"]}
+card = next(c.card for c in w.columns[None].cards() if c.card["indices"])
+drop(card, "chat")
+after = {x["index"]: x["sink"] for x in read_state()["streams"]}
+check(svc.load_rules().get(card["key"]) == "chat" and before == after,
+      "assigning on speakers saves the rule but leaves the sound where it is")
+service_state(media_dial="auto")
+check(not w.banner.isVisibleTo(w), "back on the headset: banner gone")
 w.close()
 check.done()

@@ -32,7 +32,7 @@ used: unknown ones get a USB STALL and can wedge it until a replug.
 Only needs Python 3 (stdlib) and pactl (pipewire-pulse).
 """
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 import argparse
 import errno
@@ -747,9 +747,27 @@ class Audio:
         self.mix = (100, 100)
         self.media_dial = "auto"
         self.chat_busy = False
+        # Set when you switch the system's output to something that isn't the
+        # GameDAC (speakers, say): ChatMix lets go of every app until you switch back.
+        self.away = None
+        self.moved_away = set()
+        self.built_once = False
+
+    def default_sink(self):
+        r = pactl("get-default-sink")
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    def is_headset(self, sink):
+        return sink == self.dac_sink or sink in {SINKS[k][0] for k in self.keys}
 
     def build(self):
         unload_stale_modules()
+        before = self.default_sink() if self.set_default else None
+        if not self.built_once and before and not self.is_headset(before) and \
+                not before.startswith(PREFIX):
+            self.away = before  # you'd picked another output before ChatMix started
+            log.info("Default output is %s, not the GameDAC: leaving your apps there", before)
+        self.built_once = True
         for key in self.keys:
             name, label = SINKS[key]
             nid = load_module(
@@ -762,7 +780,7 @@ class Audio:
                 raise RuntimeError(f"could not create sink {name}")
             self.null_ids[key] = nid
             self._link(key)
-        if self.set_default:
+        if self.set_default and self.away is None:
             pactl("set-default-sink", SINKS["game"][0])
         log.info("outputs ready: %s -> %s",
                  ", ".join(SINKS[k][1] for k in self.keys), self.dac_sink)
@@ -928,8 +946,72 @@ class Audio:
                      "Chat quiet - Media follows the dial (Game vs Media)")
         self.set_mix(*self.mix)
 
+    def follow_default(self):
+        """Keep up with the output you pick in your system's sound settings.
+
+        Picking anything other than the GameDAC (speakers, HDMI...) makes ChatMix
+        let go: every app it was holding in Game, Chat or Media goes to that
+        output. Picking the GameDAC again takes them back. Returns True when
+        that changed."""
+        current = self.default_sink()
+        if not current:
+            return False
+        if self.is_headset(current):
+            if current == self.dac_sink and self.set_default and SINKS["game"][0] in self._sink_names():
+                pactl("set-default-sink", SINKS["game"][0])  # the DAC itself would skip ChatMix
+            if self.away is None:
+                return False
+            log.info("Output switched back to the GameDAC: ChatMix takes your apps back")
+            self.away = None
+            self._take_back()
+            return True
+        if current.startswith(PREFIX):  # one of ours that isn't built (Media turned off)
+            return False
+        if current != self.away:
+            log.info("Output switched to %s: ChatMix lets go of your apps", current)
+            self.away = current
+            self.let_go()
+            return True
+        return False
+
+    def _sink_names(self):
+        try:
+            return {s.get("name") for s in pactl_json("sinks")}
+        except Exception:
+            return set()
+
+    def let_go(self):
+        """Send everything playing through Game / Chat / Media to the chosen output."""
+        if not self.away:
+            return
+        try:
+            sinks = {str(s.get("index")): s.get("name") for s in pactl_json("sinks")}
+            inputs = pactl_json("sink-inputs")
+        except Exception as e:
+            log.debug("let go: pactl unavailable: %s", e)
+            return
+        ours = {SINKS[k][0] for k in self.keys}
+        for si in inputs:
+            idx = si.get("index")
+            on = sinks.get(str(si.get("sink")))
+            if on in ours or idx in self.moved_away:
+                if on != self.away:
+                    pactl("move-sink-input", str(idx), self.away)
+                self.moved_away.add(idx)
+
+    def _take_back(self):
+        """Back on the GameDAC: what we moved away plays through Game again
+        (assigned apps then get moved to their own output by the rules)."""
+        try:
+            alive = {si.get("index") for si in pactl_json("sink-inputs")}
+        except Exception:
+            alive = set()
+        for idx in sorted(self.moved_away & alive):
+            pactl("move-sink-input", str(idx), SINKS["game"][0])
+        self.moved_away.clear()
+
     def publish(self):
-        write_state({"outputs": self.keys, "levels": {k: self.applied.get(k) for k in self.keys},
+        write_state({"away": self.away,"outputs": self.keys, "levels": {k: self.applied.get(k) for k in self.keys},
                      "eq": {k: {"name": v["name"], "active": k in self.chains}
                             for k, v in self.eq.items()},
                      "media_dial": self.media_dial, "chat_busy": self.chat_busy,
@@ -1081,6 +1163,7 @@ class RuleEnforcer:
         self.rules = {}
         self.mtime = None
         self.streams_changed = True
+        self.default_changed = True
 
     def start(self):
         self.stop()
@@ -1129,12 +1212,17 @@ class RuleEnforcer:
         *lines, self.buf = self.buf.split(b"\n")
         if any(b"on sink-input" in line for line in lines):
             self.streams_changed = True
+        if any(b"on server" in line for line in lines):  # the default output changed
+            self.default_changed = True
         new = {int(m.group(1)) for l in lines
                if (m := self.NEW_STREAM.search(l.decode(errors="replace")))}
         if new:
             self.apply(new)
 
     def apply(self, only=None):
+        if self.audio.away:  # you're on other speakers: keep everything off the DAC
+            self.audio.let_go()
+            return
         if not self.rules:
             return
         try:
@@ -1214,7 +1302,7 @@ class Daemon:
         self.arm_dac()
         log.info("ChatMix enabled on the dial (press the dial to switch volume/ChatMix)")
 
-        last_check = last_chat_check = time.monotonic()
+        last_check = last_chat_check = last_default_check = time.monotonic()
         while self.running:
             watch = [self.dac.fd] + ([self.rules.fileno()] if self.rules.alive() else [])
             ready, _, _ = select.select(watch, [], [], 1.0)
@@ -1222,6 +1310,13 @@ class Daemon:
                 self.rules.on_readable()
             self.rules.reload()  # picks up changes made in the ChatMix window
             now = time.monotonic()
+            if self.rules.default_changed or now - last_default_check > HEALTH_CHECK_S:
+                self.rules.default_changed = False
+                last_default_check = now
+                if self.audio.follow_default():
+                    if not self.audio.away:
+                        self.rules.apply()
+                    self.audio.publish()
             if (self.rules.streams_changed and now - last_chat_check > CHAT_CHECK_MIN_S) or \
                     now - last_chat_check > HEALTH_CHECK_S:
                 self.rules.streams_changed = False
