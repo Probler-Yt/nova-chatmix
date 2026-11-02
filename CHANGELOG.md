@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.6.0
+## 2.0.0
 
 - **Liquid Glass look, now the default.** Frosted glass panels over your desktop wallpaper, with rims that bend what's behind them, a glass tab bar, and lanes that brighten under the pointer and glow in the channel's colour while you drag an app over them. Nothing is blurred live: the backdrop and its frosted copy are painted once per window size and each panel's bent rim once per size and place, so it costs about the same as the old look once it's on screen.
 - **Your wallpaper behind the glass.** ChatMix reads the wallpaper from KDE Plasma (the main screen's; wallpaper packages pick their largest picture) or GNOME, softens and dims it so text stays readable, and updates when you change it. ⋯ > *Look* > *ChatMix colours* swaps it for ChatMix's own ribbons in the Chat, Media and Game colours, which is also what you get if no wallpaper can be found.
