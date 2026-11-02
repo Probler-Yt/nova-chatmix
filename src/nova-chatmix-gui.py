@@ -254,6 +254,11 @@ def safe_list(kind, errors):
         return []
 
 
+def types_ns():
+    import types
+    return types.SimpleNamespace(stdout="", returncode=1)
+
+
 def safe_pactl(*args):
     try:
         return svc.pactl(*args)
@@ -970,6 +975,10 @@ def stylesheet():
         padding: 0 8px 4px 8px; border-radius: 8px; }}
     QToolButton#more:hover {{ background: {T['raise']}; color: {T['text']}; }}
     QToolButton#more::menu-indicator {{ image: none; width: 0; }}
+    QToolButton#output {{ background: transparent; border: 1px solid {T['line']}; border-radius: 13px;
+        padding: 3px 12px; color: {T['muted']}; font-weight: 600; }}
+    QToolButton#output:hover {{ background: {T['raise']}; color: {T['text']}; }}
+    QToolButton#output::menu-indicator {{ image: none; width: 0; }}
     QPushButton#update {{ background: {ACCENT['chat']}; color: {T['deep']}; border: none; border-radius: 13px;
         padding: 4px 14px; font-weight: 700; }}
     QPushButton#update:hover {{ background: {QColor(ACCENT['chat']).lighter(115).name()}; }}
@@ -2352,6 +2361,18 @@ class Window(QWidget):
             self.tabs[key] = b
             bar.addWidget(b)
         bar.addStretch(1)
+        self.output_btn = QToolButton()
+        self.output_btn.setObjectName("output")
+        self.output_btn.setText("Headset")
+        self.output_btn.setCursor(Qt.PointingHandCursor)
+        self.output_btn.setPopupMode(QToolButton.InstantPopup)
+        self.output_btn.setToolTip("Where your sound plays. Same as `nova-chatmix --output toggle`, "
+                                   "which you can put on a keyboard shortcut or macro pad key.")
+        self.output_menu = QMenu(self.output_btn)
+        self.output_menu.aboutToShow.connect(self._fill_outputs)
+        self.output_btn.setMenu(self.output_menu)
+        bar.addWidget(self.output_btn)
+        bar.addSpacing(10)
         self.update_btn = QPushButton("")
         self.update_btn.setObjectName("update")
         self.update_btn.setCursor(Qt.PointingHandCursor)
@@ -2435,6 +2456,32 @@ class Window(QWidget):
         self.update_timer.setInterval(3600 * 1000)  # the check itself is cached for 12 hours
         self.update_timer.timeout.connect(self.check_updates)
         self.update_timer.start()
+
+    # ---- output (headset / speakers)
+    def _fill_outputs(self):
+        self.output_menu.clear()
+        try:
+            outputs = svc.list_outputs()
+            current = (safe_pactl("get-default-sink") or types_ns()).stdout.strip()
+        except Exception as e:
+            act = self.output_menu.addAction(f"Couldn't list outputs: {e}")
+            act.setEnabled(False)
+            return
+        for name, desc, headset in outputs:
+            act = QAction(desc, self.output_menu)
+            act.setCheckable(True)
+            act.setChecked(current == name or (headset and (current.startswith(PREFIX) or
+                                                              current == name)))
+            act.triggered.connect(lambda _=False, n=name: self.switch_output(n))
+            self.output_menu.addAction(act)
+
+    def switch_output(self, where):
+        try:
+            _, desc = svc.choose_output(where)
+            self.output_btn.setText("Headset" if where == "headset" or desc.startswith("Headset") else desc)
+        except Exception as e:
+            self.output_btn.setText(f"Couldn't switch: {e}")
+        QTimer.singleShot(500, self.refresh)
 
     # ---- updates
     def check_updates(self, force=False):
@@ -2713,6 +2760,7 @@ class Window(QWidget):
         else:
             self.banner.setVisible(False)
 
+        self.output_btn.setText(f"{snap['away']}" if snap.get("away") else "Headset")
         dial = snap.get("dial", {})
         mode = media_dial_setting()
         on_dial = dial.get("media_on_dial") if self.present else (mode != "never")

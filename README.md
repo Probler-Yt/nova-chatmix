@@ -56,7 +56,7 @@ This installs for your user only. The only part that needs `sudo` is a udev rule
 2. Open **ChatMix**. On the **Mixer** page your open apps are listed under **Apps**. Drag one into **Chat**, **Media** or **Game** to assign it, and drag it back to **Apps** to unassign it. Little level bars next to an app mean it's making sound right now.
 3. Turn the dial on the GameDAC: one way turns Chat down, the other turns Game down. The gauge at the top of the Mixer page shows where it sits. Press the dial to switch between ChatMix and plain volume.
 4. Media follows the Chat side of the dial while nothing is playing in Chat (**Dial: Auto**, the default). Use the **Dial** button in the Media lane to put it on the dial always (**On**) or never (**Off**).
-5. Switching to speakers? Just pick them as your output as usual (sound settings, a hotkey, a macro pad). ChatMix lets go of every app while you're on them, and puts each one back in Chat, Media or Game when you pick the headset again.
+5. Switching to speakers? Use the output button at the top of the window, or put `nova-chatmix --output toggle` on a keyboard shortcut or macro pad key (KDE: System Settings > Shortcuts > Add New > Command). Picking them from your sound settings works too. ChatMix lets go of every app while you're on the speakers, and puts each one back in Chat, Media or Game when you switch to the headset again.
 
 **Updating:** when there's a new version, an **Update to x.y** button appears at the top of the window. Click it and enter your password when asked; ChatMix installs the update and reopens. (⋯ > *Check for updates* checks right away. AUR users can also just `yay -Syu`.)
 

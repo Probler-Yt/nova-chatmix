@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 import types
@@ -138,6 +139,34 @@ check(wait(lambda: subprocess.run(["pactl", "get-default-sink"], capture_output=
 check(wait(lambda: sink_of("YouTube") == "ChatMix_Game" and sink_of("LateCall") == "ChatMix_Game", 5),
       "...and the apps it let go of come back through ChatMix")
 check(wait(lambda: json.load(open(svc.STATE_PATH)).get("away") is None), "...and the window is told")
+# --- the keyboard-shortcut command: nova-chatmix --output toggle
+subprocess.run(["pactl", "load-module", "module-null-sink", "sink_name=alsa_output.hdmi-stereo"], capture_output=True)
+
+
+def default():
+    return subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True).stdout.strip()
+
+
+name, desc = svc.choose_output("toggle")
+check(name == "Speakers" and wait(lambda: default() == "Speakers", 3),
+      f"toggle from the headset goes to the speakers you last used: {desc}")
+check(wait(lambda: sink_of("YouTube") == "Speakers", 5), "...and ChatMix lets go of your apps")
+name, desc = svc.choose_output("toggle")
+check(desc == "Headset (GameDAC)" and wait(lambda: default() == "ChatMix_Game", 3)
+      and wait(lambda: sink_of("YouTube") == "ChatMix_Game", 5), "toggle again: back on the headset, apps back in ChatMix")
+time.sleep(1)
+check(default() == "ChatMix_Game", "...and it stays there (no bouncing)")
+for _ in range(3):  # a key mashed a few times ends up where an odd number of presses should
+    svc.choose_output("toggle")
+check(wait(lambda: default() == "Speakers", 3) and wait(lambda: sink_of("YouTube") == "Speakers", 5),
+      "three quick presses: on the speakers, apps with it")
+time.sleep(1.5)
+check(default() == "Speakers", "...and it stays there")
+svc.choose_output("headset")
+check(wait(lambda: default() == "ChatMix_Game", 3), "--output headset")
+r = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "src", "nova-chatmix.py"), "--output", "nowhere"],
+                   capture_output=True, text=True)
+check(r.returncode != 0 and "no output called" in r.stderr, f"a wrong name is explained: {r.stderr.strip()}")
 yt.kill()
 late.kill()
 peer["sock"].send(bytes([7, 0x45, 100, 100]) + bytes(12))

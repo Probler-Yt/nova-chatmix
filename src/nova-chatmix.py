@@ -32,7 +32,7 @@ used: unknown ones get a USB STALL and can wedge it until a replug.
 Only needs Python 3 (stdlib) and pactl (pipewire-pulse).
 """
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 import argparse
 import errno
@@ -377,6 +377,84 @@ def find_dac_sink(override=None):
     # If the DAC ever exposes a separate chat endpoint, prefer the main one.
     candidates.sort(key=lambda n: ("chat" in n.lower(), n))
     return candidates[0]
+
+
+# --------------------------------------------------- switching outputs ---
+# `nova-chatmix --output toggle` for a keyboard shortcut: headset <-> speakers,
+# like Sonar's output hotkey. "Speakers" is whatever you last switched to that
+# isn't the GameDAC (remembered in output.json), or the first other output.
+
+def _output_memory():
+    return os.path.join(os.path.dirname(RULES_PATH), "output.json")
+
+
+def remember_speakers(sink):
+    try:
+        os.makedirs(os.path.dirname(_output_memory()), exist_ok=True)
+        with open(_output_memory() + ".tmp", "w") as f:
+            json.dump({"speakers": sink}, f)
+        os.replace(_output_memory() + ".tmp", _output_memory())
+    except OSError:
+        pass
+
+
+def remembered_speakers():
+    try:
+        with open(_output_memory()) as f:
+            return json.load(f).get("speakers")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def list_outputs():
+    """[(name, description, is_headset)] for every output, the headset first."""
+    sinks = pactl_json("sinks")
+    dac = find_dac_sink()
+    names = {s.get("name") for s in sinks}
+    out = []
+    if SINKS["game"][0] in names or dac:
+        out.append((SINKS["game"][0] if SINKS["game"][0] in names else dac, "Headset (GameDAC)", True))
+    for s in sinks:
+        name = s.get("name", "")
+        if name.startswith(PREFIX) or name == dac or not name:
+            continue
+        desc = s.get("description") or (s.get("properties") or {}).get("device.description") or name
+        out.append((name, desc, False))
+    return out
+
+
+def choose_output(where):
+    """Switch the system's default output. where: "headset", "speakers", "toggle"
+    or an output's name. Returns (name, description) of the one chosen."""
+    outputs = list_outputs()
+    if not outputs:
+        raise RuntimeError("no outputs found (is PipeWire running?)")
+    headset = next((o for o in outputs if o[2]), None)
+    others = [o for o in outputs if not o[2]]
+    r = pactl("get-default-sink")
+    current = r.stdout.strip() if r.returncode == 0 else ""
+    on_headset = bool(headset) and (current == headset[0] or current.startswith(PREFIX) or current == find_dac_sink())
+    if where == "toggle":
+        where = "speakers" if on_headset else "headset"
+    if where == "headset":
+        if not headset:
+            raise RuntimeError("the GameDAC isn't connected")
+        pick = headset
+    elif where == "speakers":
+        if not others:
+            raise RuntimeError("there's no other output to switch to")
+        mem = remembered_speakers()
+        pick = next((o for o in others if o[0] == mem), None) or \
+            next((o for o in others if "hdmi" not in o[0].lower()), others[0])
+    else:
+        pick = next((o for o in outputs if where in (o[0], o[1])), None)
+        if not pick:
+            raise RuntimeError(f"no output called {where!r}")
+    if pactl("set-default-sink", pick[0]).returncode != 0:
+        raise RuntimeError(f"couldn't switch to {pick[1]}")
+    if not pick[2]:
+        remember_speakers(pick[0])
+    return pick[0], pick[1]
 
 
 def load_module(*args):
@@ -970,6 +1048,7 @@ class Audio:
         if current != self.away:
             log.info("Output switched to %s: ChatMix lets go of your apps", current)
             self.away = current
+            remember_speakers(current)
             self.let_go()
             return True
         return False
@@ -1456,6 +1535,9 @@ def main():
                    help="debug: print raw DAC reports while you turn the dial")
     p.add_argument("--reset-dac", action="store_true",
                    help="headphones silent? reset the GameDAC (same as unplugging it and back in)")
+    p.add_argument("--output", metavar="WHERE",
+                   help="switch your sound to: headset, speakers, or toggle (handy on a keyboard shortcut "
+                        "or macro pad key); an output's name works too")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -1465,6 +1547,13 @@ def main():
         return listen(args)
     if args.reset_dac:
         sys.exit(reset_dac())
+    if args.output:
+        try:
+            name, desc = choose_output(args.output)
+        except Exception as e:
+            sys.exit(f"nova-chatmix: {e}")
+        print(f"Sound now plays through {desc}")
+        return
 
     d = Daemon(args)
     signal.signal(signal.SIGTERM, d.stop)

@@ -310,6 +310,17 @@ check(media.dial_btn.text() == "Dial: On" and [a.data() for a in media.dial_btn.
 next(a for a in media.dial_btn.menu().actions() if a.data() == "never").trigger()
 service_state(media_dial="never", chat_busy=False, media_on_dial=False, levels={"game": 100, "chat": 40, "media": 100})
 check(media.level.text() == "" and "never" in media.caption.text(), "Off: no dial level shown for Media")
+# --- the output menu in the top bar (headset / speakers)
+w._fill_outputs()
+items = [a.text() for a in w.output_menu.actions()]
+check(items[0] == "Headset (GameDAC)" and "Starship/Matisse HD Audio Analog Stereo" in items,
+      f"output menu lists the headset first, then your other outputs: {items}")
+check(w.output_menu.actions()[0].isChecked(), "...with the headset ticked")
+next(a for a in w.output_menu.actions() if a.text().startswith("Starship")).trigger()
+check(read_state()["default"] == "alsa_output.pci-0000_0c_00.4.analog-stereo", "choosing speakers switches the system output")
+next(a for a in w.output_menu.actions() if a.text().startswith("Headset")).trigger()
+check(read_state()["default"] == "ChatMix_Game", "choosing the headset switches back to Game")
+
 # --- on speakers: the window says so, and assigning an app doesn't pull it back to the headset
 service_state(away="alsa_output.pci-0000_0c_00.4.analog-stereo", media_dial="auto")
 check(w.banner.isVisibleTo(w) and "Playing through" in w.banner_text.text() and "let go" in w.banner_text.text(),

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.1
+
+- **Headset / speakers switching, like Sonar's hotkey.** `nova-chatmix --output toggle` switches between the headset and your speakers; put it on a keyboard shortcut or a macro pad key. `--output headset` and `--output speakers` go one way. "Speakers" is whichever other output you last used. ChatMix knows what counts as the headset, so it never fights you: a home-made switch script that checks for the GameDAC's own name sees "Game" instead, switches to the GameDAC, and ChatMix moves it straight back to Game.
+- The window's top bar shows where your sound is playing; click it to switch.
+
 ## 1.4.0
 
 - **Update button.** The window checks GitHub for a new version (twice a day, or from ⋯ > Check for updates) and shows an *Update to x.y* button. One click downloads the release and installs it the way ChatMix was installed: rebuilt as a pacman package (you're asked for your password once) or copied into `~/.local/bin` for an install.sh copy. Then it restarts the service and reopens the window.
