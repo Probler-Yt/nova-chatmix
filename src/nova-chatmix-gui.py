@@ -316,7 +316,7 @@ def audio_snapshot():
             "title": (props.get("media.name") or "").strip(),
         })
     state = svc._read(svc.STATE_PATH)
-    eq_state, dial_state, away = {}, {}, None
+    eq_state, dial_state, away, holding = {}, {}, None, False
     if state:  # the service publishes the dial position; more reliable than guessing
         try:
             st = json.loads(state)
@@ -324,6 +324,7 @@ def audio_snapshot():
             eq_state = st.get("eq", {}) if isinstance(st.get("eq"), dict) else {}
             dial_state = {"chat_busy": bool(st.get("chat_busy")), "media_on_dial": st.get("media_on_dial")}
             away = st.get("away") or None
+            holding = bool(away and st.get("speaker_dial") and st.get("routed") == away)
         except ValueError:
             pass
     away_name = None
@@ -331,7 +332,7 @@ def audio_snapshot():
         hit = next((x for x in sinks if x.get("name") == away), {})
         away_name = hit.get("description") or (hit.get("properties") or {}).get("device.description") or away
     return {"present": present, "levels": levels, "streams": streams, "errors": errors,
-            "eq_state": eq_state, "dial": dial_state, "away": away_name}
+            "eq_state": eq_state, "dial": dial_state, "away": away_name, "holding": holding}
 
 
 def build_cards(apps, snap, rules, index=None):
@@ -3244,6 +3245,13 @@ class Window(QWidget):
         act = QAction(label, self.output_menu)
         act.triggered.connect(self.edit_shortcut)
         self.output_menu.addAction(act)
+        dial = QAction("The dial works on speakers too", self.output_menu)
+        dial.setCheckable(True)
+        dial.setChecked(bool(_read_settings().get("speaker_dial", True)))
+        dial.setToolTip("On other speakers, Game / Chat / Media keep going through ChatMix (without the EQ), "
+                        "so the dial still mixes them. Off: ChatMix lets go of your apps instead.")
+        dial.triggered.connect(self.set_speaker_dial)
+        self.output_menu.addAction(dial)
         shown = self.output_menu.addMenu("Show in this list")
         hidden = svc.hidden_outputs()
         for name, desc, headset in svc.list_outputs(include_hidden=True):
@@ -3254,6 +3262,12 @@ class Window(QWidget):
             a.setChecked(name not in hidden)
             a.triggered.connect(lambda on, n=name: self.set_output_shown(n, on))
             shown.addAction(a)
+
+    def set_speaker_dial(self, on):
+        data = _read_settings()
+        data["speaker_dial"] = bool(on)
+        _write_settings(data)
+        QTimer.singleShot(500, self.refresh)
 
     def set_output_shown(self, name, shown):
         data = _read_settings()
@@ -3471,7 +3485,7 @@ class Window(QWidget):
             r = safe_pactl("get-default-sink")
             sink = r.stdout.strip() if r and r.returncode == 0 else ""
         save_rules(rules)
-        if not self.snap.get("away"):  # on speakers the rule waits until you're back on the headset
+        if not self.snap.get("away") or self.snap.get("holding"):  # let go on speakers: the rule waits for the headset
             for idx in card.get("indices") or []:
                 if sink:
                     safe_pactl("move-sink-input", str(idx), sink)
@@ -3537,6 +3551,11 @@ class Window(QWidget):
             self.banner.setVisible(True)
             self.banner_btn.setVisible(False)
             self.banner_text.setText("Couldn't read your audio setup: " + "; ".join(snap["errors"]))
+        elif self.present and snap.get("away") and snap.get("holding"):
+            self.banner.setVisible(True)
+            self.banner_btn.setVisible(False)
+            self.banner_text.setText(f"Playing through {snap['away']}. The dial still mixes Game against Chat and "
+                                     "Media; the EQs wait for the headset.")
         elif self.present and snap.get("away"):
             self.banner.setVisible(True)
             self.banner_btn.setVisible(False)

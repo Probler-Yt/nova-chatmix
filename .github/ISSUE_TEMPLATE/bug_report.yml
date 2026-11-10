@@ -1,0 +1,35 @@
+name: Something isn't working
+description: The dial, routing, EQ or the window misbehaving
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, what you got.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: nova-chatmix version
+      description: In the window under ⋯ (or `nova-chatmix --version`).
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distro and desktop
+      placeholder: CachyOS, KDE Plasma 6.5, PipeWire 1.4
+  - type: textarea
+    id: log
+    attributes:
+      label: Service log
+      description: "`journalctl --user -u nova-chatmix -n 200 --no-pager`"
+      render: text
+  - type: textarea
+    id: probe
+    attributes:
+      label: If it's the dial, the DAC probe
+      description: "`python3 scripts/dac-probe.py` from a clone of this repo, with the GameDAC plugged in."
+      render: text

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.0
+
+- **The dial works on your speakers too.** Switch to other speakers and your apps now stay in Game, Chat and Media, played out of the speakers instead of the GameDAC, so turning the dial still turns the game up and the video or Discord down. Apps that open while you're on the speakers go into Game (or wherever your rules put them). The EQs are made for the headset, so they pause on the speakers and come back when you switch back.
+- Prefer the old way, where ChatMix lets go of everything on the speakers? Untick output menu > *The dial works on speakers too* (setting `speaker_dial`). It switches over straight away.
+
 ## 2.0.0
 
 - **Liquid Glass look, now the default.** Frosted glass panels over your desktop wallpaper, with rims that bend what's behind them, a glass tab bar, and lanes that brighten under the pointer and glow in the channel's colour while you drag an app over them. Nothing is blurred live: the backdrop and its frosted copy are painted once per window size and each panel's bent rim once per size and place, so it costs about the same as the old look once it's on screen.

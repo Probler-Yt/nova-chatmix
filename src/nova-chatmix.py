@@ -32,7 +32,7 @@ used: unknown ones get a USB STALL and can wedge it until a replug.
 Only needs Python 3 (stdlib) and pactl (pipewire-pulse).
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 import argparse
 import errno
@@ -676,6 +676,17 @@ def load_media_dial():
     return mode if mode in MEDIA_DIAL_MODES else "auto"
 
 
+def load_speaker_dial():
+    """True: on other speakers, apps still go through Game / Chat / Media and the
+    dial still mixes them, just played out of the speakers (setting "speaker_dial",
+    on by default). False: ChatMix lets go of your apps entirely, as before 2.1."""
+    try:
+        with open(RULES_PATH) as f:
+            return bool(json.load(f).get("speaker_dial", True))
+    except (OSError, ValueError, AttributeError):
+        return True
+
+
 def load_eq():
     """{output: {"name": ..., "filters": [...]}} from the settings file."""
     try:
@@ -853,6 +864,10 @@ class Audio:
         self.away = None
         self.moved_away = set()
         self.built_once = False
+        # With speaker_dial on, being "away" doesn't let go: the outputs are wired
+        # to the speakers instead of the DAC (`routed` = where they're wired now).
+        self.speaker_dial = True
+        self.routed = None
 
     def default_sink(self):
         r = pactl("get-default-sink")
@@ -886,10 +901,17 @@ class Audio:
         log.info("outputs ready: %s -> %s",
                  ", ".join(SINKS[k][1] for k in self.keys), self.dac_sink)
 
+    def out_sink(self):
+        """Where Game / Chat / Media play out: the DAC, or your speakers."""
+        return self.away if (self.away and self.speaker_dial) else self.dac_sink
+
     def _link(self, key):
-        """Connect one output to the DAC: through its EQ if it has one."""
+        """Connect one output to the DAC (through its EQ if it has one), or to
+        your speakers while you're on them (no EQ there: it's tuned for the headset)."""
         name = SINKS[key][0]
-        spec = self.eq.get(key)
+        target = self.out_sink()
+        self.routed = target
+        spec = self.eq.get(key) if target == self.dac_sink else None
         if spec:
             chain = EqChain(key, spec["filters"], name, self.dac_sink)
             if chain.start():
@@ -898,14 +920,14 @@ class Audio:
                 log.info("%s EQ on: %s", SINKS[key][1], spec["name"])
                 return
             self.eq_failed.add(key)
-        base = [f"source={name}.monitor", f"sink={self.dac_sink}", "latency_msec=20"]
+        base = [f"source={name}.monitor", f"sink={target}", "latency_msec=20"]
         # *_dont_move stops WirePlumber re-routing the loopback if the DAC
         # vanishes (worst case: into our own Game sink -> feedback loop).
         lid = load_module("module-loopback", *base, "source_dont_move=true", "sink_dont_move=true")
         if lid is None:
             lid = load_module("module-loopback", *base)
         if lid is None:
-            raise RuntimeError(f"could not route {name} to {self.dac_sink}")
+            raise RuntimeError(f"could not route {name} to {target}")
         self.loop_ids[key] = lid
 
     def _unlink(self, key, ours=None):
@@ -924,12 +946,24 @@ class Audio:
         self.stream_idx.pop(key, None)
         self.applied.pop(key, None)
 
+    def reroute(self):
+        """Rewire every output to wherever it should play out now (DAC or speakers)."""
+        if not self.null_ids or self.routed == self.out_sink():
+            return
+        log.info("Game / Chat / Media now play through %s", self.out_sink())
+        for key in self.keys:
+            self._unlink(key)
+            self._link(key)
+        self.set_mix(*self.mix)
+
     def set_eq(self, eq):
         """Apply a new set of EQs, restarting only the outputs that changed."""
         eq = {k: v for k, v in eq.items() if k in self.keys}
         changed = [k for k in self.keys if eq.get(k) != self.eq.get(k)]
         self.eq = eq
         if not changed or not self.null_ids:
+            return
+        if self.routed != self.dac_sink:  # on the speakers: EQs wait for the headset
             return
         for key in changed:
             self._unlink(key)
@@ -978,9 +1012,10 @@ class Audio:
         except Exception:
             return False
         names = {s.get("name") for s in sinks}
-        if self.dac_sink not in names or not all(SINKS[k][0] in names for k in self.keys):
+        out = self.routed or self.dac_sink
+        if self.dac_sink not in names or out not in names or not all(SINKS[k][0] in names for k in self.keys):
             return False
-        dac_index = next(str(s.get("index")) for s in sinks if s.get("name") == self.dac_sink)
+        dac_index = next(str(s.get("index")) for s in sinks if s.get("name") == out)
         linked = {str(si.get("owner_module")) for si in inputs if str(si.get("sink")) == dac_index}
         for k in self.keys:
             if k in self.chains:
@@ -1065,16 +1100,39 @@ class Audio:
             log.info("Output switched back to the GameDAC: ChatMix takes your apps back")
             self.away = None
             self._take_back()
+            self.reroute()
             return True
         if current.startswith(PREFIX):  # one of ours that isn't built (Media turned off)
             return False
         if current != self.away:
-            log.info("Output switched to %s: ChatMix lets go of your apps", current)
             self.away = current
             remember_speakers(current)
-            self.let_go()
+            if self.speaker_dial:
+                log.info("Output switched to %s: the dial keeps working, through the speakers", current)
+                self.reroute()
+            else:
+                log.info("Output switched to %s: ChatMix lets go of your apps", current)
+                self.let_go()
             return True
         return False
+
+    def set_speaker_dial(self, on):
+        """The setting changed: switch between keeping hold (through the speakers)
+        and letting go, right now if you're on the speakers."""
+        if on == self.speaker_dial:
+            return
+        self.speaker_dial = on
+        log.info("Dial on the speakers: %s", "on" if on else "off")
+        if not self.away:
+            return
+        if on:
+            self._take_back()
+        self.reroute()
+        if not on:
+            self.let_go()
+
+    def holding_on_speakers(self):
+        return bool(self.away and self.speaker_dial)
 
     def _sink_names(self):
         try:
@@ -1084,7 +1142,7 @@ class Audio:
 
     def let_go(self):
         """Send everything playing through Game / Chat / Media to the chosen output."""
-        if not self.away:
+        if not self.away or self.speaker_dial:
             return
         try:
             sinks = {str(s.get("index")): s.get("name") for s in pactl_json("sinks")}
@@ -1113,7 +1171,7 @@ class Audio:
         self.moved_away.clear()
 
     def publish(self):
-        write_state({"away": self.away,"outputs": self.keys, "levels": {k: self.applied.get(k) for k in self.keys},
+        write_state({"away": self.away, "speaker_dial": self.speaker_dial, "routed": self.routed, "outputs": self.keys, "levels": {k: self.applied.get(k) for k in self.keys},
                      "eq": {k: {"name": v["name"], "active": k in self.chains}
                             for k, v in self.eq.items()},
                      "media_dial": self.media_dial, "chat_busy": self.chat_busy,
@@ -1257,6 +1315,7 @@ class RuleEnforcer:
     including streams they open later - so this works with the window closed."""
 
     NEW_STREAM = re.compile(r"Event 'new' on sink-input #(\d+)")
+    CHANGED_STREAM = re.compile(r"Event 'change' on sink-input #(\d+)")
 
     def __init__(self, audio):
         self.audio = audio
@@ -1295,6 +1354,7 @@ class RuleEnforcer:
         if force or mtime != self.mtime:
             self.mtime = mtime
             self.rules = load_rules()
+            self.audio.set_speaker_dial(load_speaker_dial())
             self.apply()
             self.audio.set_eq(load_eq())
             mode = load_media_dial()
@@ -1318,14 +1378,20 @@ class RuleEnforcer:
             self.default_changed = True
         new = {int(m.group(1)) for l in lines
                if (m := self.NEW_STREAM.search(l.decode(errors="replace")))}
+        if self.audio.holding_on_speakers():
+            # on the speakers a new app is only caught once it's playing there, which can be a
+            # moment after it appears: look again whenever a stream changes
+            new |= {int(m.group(1)) for l in lines
+                    if (m := self.CHANGED_STREAM.search(l.decode(errors="replace")))}
         if new:
             self.apply(new)
 
     def apply(self, only=None):
-        if self.audio.away:  # you're on other speakers: keep everything off the DAC
+        if self.audio.away and not self.audio.speaker_dial:  # let go: keep everything off the DAC
             self.audio.let_go()
             return
-        if not self.rules:
+        on_speakers = self.audio.holding_on_speakers()
+        if not self.rules and not on_speakers:
             return
         try:
             sinks = {s.get("index"): s.get("name") for s in pactl_json("sinks")}
@@ -1347,6 +1413,8 @@ class RuleEnforcer:
             if target is None:  # rules saved by older versions used the binary name
                 key = stream_key(si.get("properties") or {})
                 target = self.rules.get(key) if key else None
+            if on_speakers and target not in self.audio.keys and sinks.get(si.get("sink")) == self.audio.away:
+                target = "game"  # new apps open on the speakers (your default): into Game, so the dial has them
             if target not in self.audio.keys:
                 continue
             sink = SINKS[target][0]
@@ -1395,6 +1463,7 @@ class Daemon:
         self.audio = Audio(sink, not self.args.no_media, not self.args.no_default)
         self.audio.eq = load_eq()
         self.audio.media_dial = load_media_dial()
+        self.audio.speaker_dial = load_speaker_dial()
         self.audio.build()
         self.audio.set_mix(100, 100)
         self.rules = RuleEnforcer(self.audio)
@@ -1416,7 +1485,7 @@ class Daemon:
                 self.rules.default_changed = False
                 last_default_check = now
                 if self.audio.follow_default():
-                    if not self.audio.away:
+                    if not self.audio.away or self.audio.speaker_dial:
                         self.rules.apply()
                     self.audio.publish()
             if (self.rules.streams_changed and now - last_chat_check > CHAT_CHECK_MIN_S) or \

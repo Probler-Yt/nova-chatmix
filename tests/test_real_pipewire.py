@@ -109,7 +109,7 @@ with wave.open(os.path.join(root, "long.wav"), "wb") as w:
     w.setnchannels(2)
     w.setsampwidth(2)
     w.setframerate(48000)
-    w.writeframes(bytes(48000 * 30 * 4))
+    w.writeframes(bytes(48000 * 120 * 4))
 
 
 def sink_of(app):
@@ -119,6 +119,9 @@ def sink_of(app):
     return hit[0] if hit else None
 
 
+# first the "let go" way (setting speaker_dial off)
+save_settings(speaker_dial=False)
+check(wait(lambda: d.audio.speaker_dial is False), "'The dial works on speakers too' switched off")
 yt = subprocess.Popen(["pw-play", "--target", "ChatMix_Media", "-P", "application.name=YouTube",
                        os.path.join(root, "long.wav")])
 check(wait(lambda: sink_of("YouTube") == "ChatMix_Media"), "YouTube playing through Media")
@@ -139,6 +142,51 @@ check(wait(lambda: subprocess.run(["pactl", "get-default-sink"], capture_output=
 check(wait(lambda: sink_of("YouTube") == "ChatMix_Game" and sink_of("LateCall") == "ChatMix_Game", 5),
       "...and the apps it let go of come back through ChatMix")
 check(wait(lambda: json.load(open(svc.STATE_PATH)).get("away") is None), "...and the window is told")
+
+# --- the default since 2.1: on the speakers, ChatMix keeps hold and the dial keeps working
+def loop_sink(key):
+    names = {str(x["index"]): x["name"] for x in pj("sinks")}
+    hit = [names.get(str(si["sink"])) for si in pj("sink-inputs") if str(si["owner_module"]) == str(d.audio.loop_ids.get(key))]
+    return hit[0] if hit else None
+
+
+with wave.open(os.path.join(root, "longer.wav"), "wb") as w:
+    w.setnchannels(2)
+    w.setsampwidth(2)
+    w.setframerate(48000)
+    w.writeframes(bytes(48000 * 120 * 4))
+yt.kill()
+yt = subprocess.Popen(["pw-play", "--target", "ChatMix_Media", "-P", "application.name=YouTube",
+                       os.path.join(root, "longer.wav")])
+save_settings()
+check(wait(lambda: d.audio.speaker_dial is True), "'The dial works on speakers too' is on by default")
+check(wait(lambda: sink_of("YouTube") == "ChatMix_Media"), "YouTube in Media")
+check(wait(lambda: loop_sink("game") == realpw.DAC), "on the headset, Game plays into the GameDAC")
+subprocess.run(["pactl", "set-default-sink", "Speakers"], check=True)
+check(wait(lambda: all(loop_sink(k) == "Speakers" for k in d.audio.keys), 5),
+      "switch to the speakers: Game, Chat and Media now play out of the speakers")
+check(wait(lambda: sink_of("YouTube") == "ChatMix_Media", 5), "...and the apps stay in their channels")
+peer["sock"].send(bytes([7, 0x45, 100, 30]) + bytes(12))
+check(wait(lambda: vol(next(s for s in pj("sink-inputs") if str(s["owner_module"]) == str(d.audio.loop_ids["chat"]))) == "30%"),
+      "turning the dial on the speakers turns Chat down")
+fresh = subprocess.Popen(["pw-play", "--target", "Speakers", "-P", "application.name=NewGame", os.path.join(root, "longer.wav")])
+check(wait(lambda: sink_of("NewGame") == "ChatMix_Game", 10), "an app that starts on the speakers goes into Game, so the dial has it")
+check(wait(lambda: json.load(open(svc.STATE_PATH)).get("routed") == "Speakers"), "...and the window can see it's holding on")
+check(subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True).stdout.strip() == "Speakers",
+      "the speakers stay your default output")
+save_settings(speaker_dial=False)
+check(wait(lambda: sink_of("YouTube") == "Speakers" and sink_of("NewGame") == "Speakers", 6),
+      "switching the setting off while on the speakers lets go of everything at once")
+save_settings()
+check(wait(lambda: sink_of("YouTube") in ("ChatMix_Media", "ChatMix_Game") and sink_of("NewGame") == "ChatMix_Game"
+           and loop_sink("game") == "Speakers", 6),
+      "...and on again takes them back")
+subprocess.run(["pactl", "set-default-sink", realpw.DAC], check=True)
+check(wait(lambda: all(loop_sink(k) == realpw.DAC for k in d.audio.keys), 6), "back on the headset: everything plays into the GameDAC again")
+check(wait(lambda: d.audio.healthy(), 5), "...and the service sees it all as healthy")
+fresh.kill()
+save_settings(speaker_dial=False)  # the toggle checks below are about letting go
+check(wait(lambda: d.audio.speaker_dial is False), "(let-go mode for the toggle checks)")
 # --- the keyboard-shortcut command: nova-chatmix --output toggle
 subprocess.run(["pactl", "load-module", "module-null-sink", "sink_name=alsa_output.hdmi-stereo"], capture_output=True)
 
